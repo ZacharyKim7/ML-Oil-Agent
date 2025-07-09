@@ -1,4 +1,4 @@
-import os, dotenv, requests, pandas as pd, json
+import os, dotenv, requests, json
 from datetime import date
 dotenv.load_dotenv()
 
@@ -194,7 +194,7 @@ def usa_from_nopec():
     return data
 
 def WTI_price():
-    url = f"https://api.eia.gov/v2/petroleum/pri/spt/data/?api_key={EIA}&frequency=daily&data[0]=value&facets[series][]=RWTC&sort[0][column]=period&sort[0][direction]=desc&offset=0&length=5000"
+    url = f"https://api.eia.gov/v2/petroleum/pri/spt/data/?api_key={EIA}&frequency=monthly&data[0]=value&facets[series][]=RWTC&sort[0][column]=period&sort[0][direction]=desc&offset=0&length=5000"
     response = requests.get(url)
     data = response.json()
     
@@ -215,7 +215,7 @@ def WTI_price():
     return data 
 
 def brent_price():
-    url = f"https://api.eia.gov/v2/petroleum/pri/spt/data/?api_key={EIA}&frequency=daily&data[0]=value&facets[series][]=RBRTE&sort[0][column]=period&sort[0][direction]=desc&offset=0&length=5000"
+    url = f"https://api.eia.gov/v2/petroleum/pri/spt/data/?api_key={EIA}&frequency=monthly&data[0]=value&facets[series][]=RBRTE&sort[0][column]=period&sort[0][direction]=desc&offset=0&length=5000"
     response = requests.get(url)
     data = response.json()
     
@@ -235,14 +235,37 @@ def brent_price():
     print(f"EIA data saved to: {filepath}")
     return data 
 
+def US_rig_count():
+    url = f"https://api.eia.gov/v2/natural-gas/enr/drill/data/?api_key={EIA}&frequency=monthly&data[0]=value&facets[series][]=E_ERTRR0_XR0_NUS_C&sort[0][column]=period&sort[0][direction]=desc&offset=0&length=5000"
+    response = requests.get(url)
+    data = response.json()
+    
+    # Save the JSON data to the data folder
+    data_folder = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data')
+    os.makedirs(data_folder, exist_ok=True)
+    
+    # Create filename with timestamp
+    today = date.today().strftime("%Y-%m-%d")
+    filename = f"US_rig_count_{today}.json"
+    filepath = os.path.join(data_folder, filename)
+    
+    # Save the JSON data
+    with open(filepath, 'w') as f:
+        json.dump(data, f, indent=2)
+    
+    print(f"EIA data saved to: {filepath}")
+    return data 
+
+
 # opec_production()
 # non_opec_production()
 # oecd_consumption()
-china_consumption()
-india_consumption()
+# china_consumption()
+# india_consumption()
 # oecd_stocks()
 # usa_stocks()
 # usa_from_opec()
 # usa_from_nopec()
 # WTI_price()
 # brent_price()
+US_rig_count()
