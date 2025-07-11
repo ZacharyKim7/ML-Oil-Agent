@@ -1,3 +1,7 @@
 dotenv
 pandas
 requests
+lxml
+html5lib
+bs4
+finnhub-python
