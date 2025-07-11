@@ -194,7 +194,7 @@ def usa_from_nopec():
     return data
 
 def WTI_price():
-    url = f"https://api.eia.gov/v2/petroleum/pri/spt/data/?api_key={EIA}&frequency=monthly&data[0]=value&facets[series][]=RWTC&sort[0][column]=period&sort[0][direction]=desc&offset=0&length=5000"
+    url = f"https://api.eia.gov/v2/petroleum/pri/spt/data/?api_key={EIA}&frequency=daily&data[0]=value&facets[series][]=RWTC&sort[0][column]=period&sort[0][direction]=desc&offset=0&length=5000"
     response = requests.get(url)
     data = response.json()
     
@@ -215,7 +215,7 @@ def WTI_price():
     return data 
 
 def brent_price():
-    url = f"https://api.eia.gov/v2/petroleum/pri/spt/data/?api_key={EIA}&frequency=monthly&data[0]=value&facets[series][]=RBRTE&sort[0][column]=period&sort[0][direction]=desc&offset=0&length=5000"
+    url = f"https://api.eia.gov/v2/petroleum/pri/spt/data/?api_key={EIA}&frequency=daily&data[0]=value&facets[series][]=RBRTE&sort[0][column]=period&sort[0][direction]=desc&offset=0&length=5000"
     response = requests.get(url)
     data = response.json()
     
@@ -266,6 +266,6 @@ def US_rig_count():
 # usa_stocks()
 # usa_from_opec()
 # usa_from_nopec()
-# WTI_price()
-# brent_price()
-US_rig_count()
+WTI_price()
+brent_price()
+# US_rig_count()
