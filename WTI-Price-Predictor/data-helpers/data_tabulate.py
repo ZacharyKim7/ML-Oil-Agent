@@ -1,0 +1,537 @@
+import EIA_data_getter as EIA
+import FRED_data_getter as FRED
+import WB_data_getter as WB
+import yahoo_data_getter as Yahoo
+import pandas as pd, os, json
+from pandas.tseries.offsets import MonthEnd
+
+"""
+This file contains the data pipeline that converts and adds the API response data
+into a single Pandas data frame, df. The functions also include a "live_read" parameter
+that can switch between pulling the data and processing it directly in memory, or if 
+the pipeline stores the data as a JSON first and then reads from the JSONs.
+"""
+
+def get_EIA_data_folder():
+    return os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data/EIA')
+
+def get_WB_data_folder():
+    return os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data/WB')
+
+def get_FRED_data_folder():
+    return os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data/FRED')
+
+def get_Yahoo_data_folder():
+    return os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data/Yahoo')
+
+def tabulate_brent_price(live_read = False):
+    data = None
+    if live_read:
+        data = EIA.brent_price()
+    else:
+        data_folder = get_EIA_data_folder()
+        filepath = os.path.join(data_folder, f"brent_price.json")
+        with open(filepath, 'r') as f:
+            data = json.load(f)
+
+    df = pd.DataFrame([
+    {
+        "Date": item["period"],
+        "Brent ($/bbl)": float(item["value"])
+    }
+    for item in data["response"]["data"]
+    ])
+
+    # Set 'Date' as the index and convert it to datetime
+    df["Date"] = pd.to_datetime(df["Date"])
+    df.set_index("Date", inplace=True)
+
+    return df
+
+def add_WTI_to_df(df, live_read = False):
+    data = None
+    if live_read:
+        data = EIA.WTI_price()
+    else:
+        data_folder = get_EIA_data_folder()
+        filepath = os.path.join(data_folder, f"WTI_price.json")
+        with open(filepath, 'r') as f:
+            data = json.load(f)
+
+    new_df = pd.DataFrame([
+    {
+        "Date": item["period"],
+        "WTI ($/bbl)": float(item["value"])  # different column name
+    }
+    for item in data["response"]["data"]
+    ])
+    new_df["Date"] = pd.to_datetime(new_df["Date"])
+    new_df.set_index("Date", inplace=True)
+
+    # Merge new_df into existing df by index
+    return df.merge(new_df, how='outer', left_index=True, right_index=True)
+
+def add_OPEC_production_to_df(df, live_read = False, lag_days = 30):
+    """
+    Adds a lagged monthly cumulative time series to a daily-indexed DataFrame.
+    """
+    data = None
+    if live_read:
+        data = EIA.opec_production()
+    else:
+        data_folder = get_EIA_data_folder()
+        filepath = os.path.join(data_folder, f"opec_production.json")
+        with open(filepath, 'r') as f:
+            data = json.load(f)
+
+    column_name = "OPEC P (tbbl/d)"
+    monthly_df = pd.DataFrame([
+        {
+            "Date": item["period"] + "-01",  # turn "2025-03" into "2025-03-01"
+            column_name: float(item["value"]) if item["value"] not in ('', '.', None) else None
+        }
+        for item in data["response"]["data"]
+    ])
+    monthly_df["Date"] = pd.to_datetime(monthly_df["Date"])
+    monthly_df.set_index("Date", inplace=True)
+
+    # Fill entire month with same value
+    daily_entries = []
+    for month_start, row in monthly_df.iterrows():
+        if pd.isna(row[column_name]):
+            continue
+        month_end = month_start + MonthEnd(0)
+        days = pd.date_range(start=month_start, end=month_end)
+        for day in days:
+            daily_entries.append({
+                "Date": day + pd.Timedelta(days=lag_days),  # Apply 30-day lag
+                column_name: row[column_name]
+            })
+
+    daily_df = pd.DataFrame(daily_entries)
+    daily_df.set_index("Date", inplace=True)
+
+    # Trim to match master DataFrame's date range
+    daily_df = daily_df.reindex(df.index)
+
+    # Merge with the master DataFrame
+    return df.merge(daily_df, how='left', left_index=True, right_index=True)
+
+def add_NOPEC_production_to_df(df, live_read = False, lag_days = 30):
+    data = None
+    if live_read:
+        data = EIA.non_opec_production()
+    else:
+        data_folder = get_EIA_data_folder()
+        filepath = os.path.join(data_folder, f"non_opec_production.json")
+        with open(filepath, 'r') as f:
+            data = json.load(f)
+
+    column_name = "NOPEC P (tbbl/d)"
+    monthly_df = pd.DataFrame([
+        {
+            "Date": item["period"] + "-01",  # turn "2025-03" into "2025-03-01"
+            column_name: float(item["value"]) if item["value"] not in ('', '.', None) else None
+        }
+        for item in data["response"]["data"]
+    ])
+    monthly_df["Date"] = pd.to_datetime(monthly_df["Date"])
+    monthly_df.set_index("Date", inplace=True)
+
+    # Fill entire month with same value
+    daily_entries = []
+    for month_start, row in monthly_df.iterrows():
+        if pd.isna(row[column_name]):
+            continue
+        month_end = month_start + MonthEnd(0)
+        days = pd.date_range(start=month_start, end=month_end)
+        for day in days:
+            daily_entries.append({
+                "Date": day + pd.Timedelta(days=lag_days),  # Apply 30-day lag
+                column_name: row[column_name]
+            })
+
+    daily_df = pd.DataFrame(daily_entries)
+    daily_df.set_index("Date", inplace=True)
+
+    # Trim to match master DataFrame's date range
+    daily_df = daily_df.reindex(df.index)
+
+    # Merge with the master DataFrame
+    return df.merge(daily_df, how='left', left_index=True, right_index=True)
+
+def add_OECD_Consumption_to_df(df, live_read=False, lag_days=30):
+    data = None
+    if live_read:
+        data = EIA.oecd_consumption()
+    else:
+        data_folder = get_EIA_data_folder()
+        filepath = os.path.join(data_folder, f"oecd_consumption.json")
+        with open(filepath, 'r') as f:
+            data = json.load(f)
+
+    column_name = "OECD C (tbbl/d)"
+    monthly_df = pd.DataFrame([
+        {
+            "Date": item["period"] + "-01",
+            column_name: float(item["value"]) if item["value"] not in ('', '.', None) else None
+        }
+        for item in data["response"]["data"]
+    ])
+    monthly_df["Date"] = pd.to_datetime(monthly_df["Date"])
+    monthly_df.set_index("Date", inplace=True)
+
+    # Fill entire month with same value
+    daily_entries = []
+    for month_start, row in monthly_df.iterrows():
+        if pd.isna(row[column_name]):
+            continue
+        month_end = month_start + MonthEnd(0)
+        days = pd.date_range(start=month_start, end=month_end)
+        for day in days:
+            daily_entries.append({
+                "Date": day + pd.Timedelta(days=lag_days),  # Apply 30-day lag
+                column_name: row[column_name]
+            })
+
+    daily_df = pd.DataFrame(daily_entries)
+    daily_df.set_index("Date", inplace=True)
+
+    # Trim to match master DataFrame's date range
+    daily_df = daily_df.reindex(df.index)
+
+    # Merge with the master DataFrame
+    return df.merge(daily_df, how='left', left_index=True, right_index=True)
+
+def add_China_Consumption_to_df(df, live_read=False, lag_days = 365):
+    data = None
+    """
+    Normally, the live_read function would allow for a live read.
+    However, China's data is annually with a delay > 365 days. 
+    The current data in the JSON is hard coded from recent reports,
+    and will be valid for the next few years. Thus, live_read has been disabled.
+    """
+    # if live_read:
+    #     data = EIA.china_consumption()
+    # else:
+    data_folder = get_EIA_data_folder()
+    filepath = os.path.join(data_folder, f"china_consumption.json")
+    with open(filepath, 'r') as f:
+        data = json.load(f)
+
+    column_name = "China C (tbbl/d)"
+    annual_df = pd.DataFrame([
+        {
+            "Date": item["period"] + "-01-01",
+            column_name: float(item["value"]) if item["value"] not in ('', '.', None) else None
+        }
+        for item in data["response"]["data"]
+    ])
+    annual_df["Date"] = pd.to_datetime(annual_df["Date"])
+    annual_df.set_index("Date", inplace=True)
+
+    # Fill entire year with same value, and shift by lag_days
+    daily_entries = []
+    for year_start, row in annual_df.iterrows():
+        if pd.isna(row[column_name]):
+            continue
+        year_end = year_start + pd.DateOffset(years=1) - pd.Timedelta(days=1)
+        days = pd.date_range(start=year_start, end=year_end)
+        for day in days:
+            daily_entries.append({
+                "Date": day + pd.Timedelta(days=lag_days),
+                column_name: row[column_name]
+            })
+
+    daily_df = pd.DataFrame(daily_entries)
+    daily_df.set_index("Date", inplace=True)
+
+    # Trim to match master DataFrame's date range
+    daily_df = daily_df.reindex(df.index)
+
+    # Merge with the master DataFrame
+    return df.merge(daily_df, how='left', left_index=True, right_index=True)
+
+def add_India_Consumption_to_df(df, live_read=False, lag_days = 365):
+    data = None
+    """
+    Normally, the live_read function would allow for a live read.
+    However, India's data is annually with a delay > 365 days. 
+    The current data in the JSON is hard coded from recent reports,
+    and will be valid for the next few years. Thus, live_read has been disabled.
+    """
+    # if live_read:
+    #     data = EIA.china_consumption()
+    # else:
+    data_folder = get_EIA_data_folder()
+    filepath = os.path.join(data_folder, f"india_consumption.json")
+    with open(filepath, 'r') as f:
+        data = json.load(f)
+
+    column_name = "India C (tbbl/d)"
+    annual_df = pd.DataFrame([
+        {
+            "Date": item["period"] + "-01-01",
+            column_name: float(item["value"]) if item["value"] not in ('', '.', None) else None
+        }
+        for item in data["response"]["data"]
+    ])
+    annual_df["Date"] = pd.to_datetime(annual_df["Date"])
+    annual_df.set_index("Date", inplace=True)
+
+    # Fill entire year with same value, and shift by lag_days
+    daily_entries = []
+    for year_start, row in annual_df.iterrows():
+        if pd.isna(row[column_name]):
+            continue
+        year_end = year_start + pd.DateOffset(years=1) - pd.Timedelta(days=1)
+        days = pd.date_range(start=year_start, end=year_end)
+        for day in days:
+            daily_entries.append({
+                "Date": day + pd.Timedelta(days=lag_days),
+                column_name: row[column_name]
+            })
+
+    daily_df = pd.DataFrame(daily_entries)
+    daily_df.set_index("Date", inplace=True)
+
+    # Trim to match master DataFrame's date range
+    daily_df = daily_df.reindex(df.index)
+
+    # Merge with the master DataFrame
+    return df.merge(daily_df, how='left', left_index=True, right_index=True)
+
+def add_OECD_stocks_to_df(df, live_read=False, lag_days = 30):
+    data = None
+    if live_read:
+        data = EIA.oecd_stocks()
+    else:
+        data_folder = get_EIA_data_folder()
+        filepath = os.path.join(data_folder, f"oecd_stocks.json")
+        with open(filepath, 'r') as f:
+            data = json.load(f)
+
+    column_name = "OECD S (mbbl)"
+    monthly_df = pd.DataFrame([
+        {
+            "Date": item["period"] + "-01",
+            column_name: float(item["value"]) if item["value"] not in ('', '.', None) else None
+        }
+        for item in data["response"]["data"]
+    ])
+    monthly_df["Date"] = pd.to_datetime(monthly_df["Date"])
+    monthly_df.set_index("Date", inplace=True)
+
+    # Fill entire month with same value
+    daily_entries = []
+    for month_start, row in monthly_df.iterrows():
+        if pd.isna(row[column_name]):
+            continue
+        month_end = month_start + MonthEnd(0)
+        days = pd.date_range(start=month_start, end=month_end)
+        for day in days:
+            daily_entries.append({
+                "Date": day + pd.Timedelta(days=lag_days),  # Apply 30-day lag
+                column_name: row[column_name]
+            })
+
+    daily_df = pd.DataFrame(daily_entries)
+    daily_df.set_index("Date", inplace=True)
+
+    # Trim to match master DataFrame's date range
+    daily_df = daily_df.reindex(df.index)
+
+    # Merge with the master DataFrame
+    return df.merge(daily_df, how='left', left_index=True, right_index=True)
+
+def add_USA_stocks_to_df(df, live_read=False, lag_days = 30):
+    data = None
+    if live_read:
+        data = EIA.usa_stocks()
+    else:
+        data_folder = get_EIA_data_folder()
+        filepath = os.path.join(data_folder, f"usa_stocks.json")
+        with open(filepath, 'r') as f:
+            data = json.load(f)
+
+    column_name = "USA S (mbbl)"
+    monthly_df = pd.DataFrame([
+        {
+            "Date": item["period"] + "-01",
+            column_name: float(item["value"]) if item["value"] not in ('', '.', None) else None
+        }
+        for item in data["response"]["data"]
+    ])
+    monthly_df["Date"] = pd.to_datetime(monthly_df["Date"])
+    monthly_df.set_index("Date", inplace=True)
+
+    # Fill entire month with same value
+    daily_entries = []
+    for month_start, row in monthly_df.iterrows():
+        if pd.isna(row[column_name]):
+            continue
+        month_end = month_start + MonthEnd(0)
+        days = pd.date_range(start=month_start, end=month_end)
+        for day in days:
+            daily_entries.append({
+                "Date": day + pd.Timedelta(days=lag_days),  # Apply 30-day lag
+                column_name: row[column_name]
+            })
+
+    daily_df = pd.DataFrame(daily_entries)
+    daily_df.set_index("Date", inplace=True)
+
+    # Trim to match master DataFrame's date range
+    daily_df = daily_df.reindex(df.index)
+
+    # Merge with the master DataFrame
+    return df.merge(daily_df, how='left', left_index=True, right_index=True)
+
+def add_USA_from_OPEC(df, live_read=False, lag_days=30):
+    data = None
+    if live_read:
+        data = EIA.usa_from_opec()
+    else:
+        data_folder = get_EIA_data_folder()
+        filepath = os.path.join(data_folder, f"usa_from_opec.json")
+        with open(filepath, 'r') as f:
+            data = json.load(f)
+
+    column_name = "USA <- OPEC (tbbl/d)"
+    monthly_df = pd.DataFrame([
+        {
+            "Date": item["period"] + "-01",
+            column_name: float(item["value"]) if item["value"] not in ('', '.', None) else None
+        }
+        for item in data["response"]["data"]
+    ])
+    monthly_df["Date"] = pd.to_datetime(monthly_df["Date"])
+    monthly_df.set_index("Date", inplace=True)
+
+    # Fill entire month with same value
+    daily_entries = []
+    for month_start, row in monthly_df.iterrows():
+        if pd.isna(row[column_name]):
+            continue
+        month_end = month_start + MonthEnd(0)
+        days = pd.date_range(start=month_start, end=month_end)
+        for day in days:
+            daily_entries.append({
+                "Date": day + pd.Timedelta(days=lag_days),  # Apply 30-day lag
+                column_name: row[column_name]
+            })
+
+    daily_df = pd.DataFrame(daily_entries)
+    daily_df.set_index("Date", inplace=True)
+
+    # Trim to match master DataFrame's date range
+    daily_df = daily_df.reindex(df.index)
+
+    # Merge with the master DataFrame
+    return df.merge(daily_df, how='left', left_index=True, right_index=True)
+
+def add_USA_from_NOPEC(df, live_read=False, lag_days=30):
+    data = None
+    if live_read:
+        data = EIA.usa_from_nopec()
+    else:
+        data_folder = get_EIA_data_folder()
+        filepath = os.path.join(data_folder, f"usa_from_nopec.json")
+        with open(filepath, 'r') as f:
+            data = json.load(f)
+
+    column_name = "USA <- NOPEC (tbbl/m)"
+    monthly_df = pd.DataFrame([
+        {
+            "Date": item["period"] + "-01",
+            column_name: float(item["value"]) if item["value"] not in ('', '.', None) else ""
+        }
+        for item in data["response"]["data"]
+    ])
+    monthly_df["Date"] = pd.to_datetime(monthly_df["Date"])
+    monthly_df.set_index("Date", inplace=True)
+
+    # Fill entire month with same value
+    daily_entries = []
+    for month_start, row in monthly_df.iterrows():
+        if pd.isna(row[column_name]):
+            continue
+        month_end = month_start + MonthEnd(0)
+        days = pd.date_range(start=month_start, end=month_end)
+        for day in days:
+            daily_entries.append({
+                "Date": day + pd.Timedelta(days=lag_days),  # Apply 30-day lag
+                column_name: row[column_name]
+            })
+
+    daily_df = pd.DataFrame(daily_entries)
+    daily_df.set_index("Date", inplace=True)
+
+    # Trim to match master DataFrame's date range
+    daily_df = daily_df.reindex(df.index)
+
+    # Merge with the master DataFrame
+    return df.merge(daily_df, how='left', left_index=True, right_index=True)
+
+def add_USA_rig_count(df, live_read=False, lag_days=30):
+    data = None
+    if live_read:
+        data = EIA.usa_rig_count()
+    else:
+        data_folder = get_EIA_data_folder()
+        filepath = os.path.join(data_folder, f"US_rig_count.json")
+        with open(filepath, 'r') as f:
+            data = json.load(f)
+
+    column_name = "USA rigs (m)"
+    monthly_df = pd.DataFrame([
+        {
+            "Date": item["period"] + "-01",
+            column_name: float(item["value"]) if item["value"] not in ('', '.', None) else None
+        }
+        for item in data["response"]["data"]
+    ])
+    monthly_df["Date"] = pd.to_datetime(monthly_df["Date"])
+    monthly_df.set_index("Date", inplace=True)
+
+    # Fill entire month with same value
+    daily_entries = []
+    for month_start, row in monthly_df.iterrows():
+        if pd.isna(row[column_name]):
+            continue
+        month_end = month_start + MonthEnd(0)
+        days = pd.date_range(start=month_start, end=month_end)
+        for day in days:
+            daily_entries.append({
+                "Date": day + pd.Timedelta(days=lag_days),  # Apply 30-day lag
+                column_name: row[column_name]
+            })
+
+    daily_df = pd.DataFrame(daily_entries)
+    daily_df.set_index("Date", inplace=True)
+
+    # Trim to match master DataFrame's date range
+    daily_df = daily_df.reindex(df.index)
+
+    # Merge with the master DataFrame
+    return df.merge(daily_df, how='left', left_index=True, right_index=True)
+
+# Controls whether API data is stored as JSON and read, or pulled and processed directly in memory
+handle_in_memory = False
+
+master = (
+    tabulate_brent_price(handle_in_memory)
+    .pipe(add_WTI_to_df, live_read=handle_in_memory)
+    .pipe(add_OPEC_production_to_df, live_read=handle_in_memory, lag_days=30)
+    .pipe(add_NOPEC_production_to_df, live_read=handle_in_memory, lag_days=30)
+    .pipe(add_OECD_Consumption_to_df, live_read=handle_in_memory, lag_days=30)
+    .pipe(add_China_Consumption_to_df, live_read=handle_in_memory, lag_days=365)
+    .pipe(add_India_Consumption_to_df, live_read=handle_in_memory, lag_days=365)
+    .pipe(add_OECD_stocks_to_df, live_read=handle_in_memory, lag_days=30)
+    .pipe(add_USA_stocks_to_df, live_read=handle_in_memory, lag_days=30)
+    .pipe(add_USA_from_OPEC, live_read=handle_in_memory, lag_days=30)
+    .pipe(add_USA_from_NOPEC, live_read=handle_in_memory, lag_days=30)
+    .pipe(add_USA_rig_count, live_read=handle_in_memory, lag_days=30)
+)
+
+print(master)
