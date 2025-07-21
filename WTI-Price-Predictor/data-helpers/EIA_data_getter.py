@@ -7,11 +7,36 @@ dotenv.load_dotenv()
 EIA = os.getenv("EIA_KEY")
 
 def get_data_folder():
-    return os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data/EIA')
+    return os.path.join(os.path.dirname(os.path.dirname(__file__)), "data/EIA")
 
 def fetch_and_store_json(url: str, filename: str) -> dict:
-    response = requests.get(url)
-    data = response.json()
+    all_data = []
+    offset = 0
+    limit = 5000
+
+    while True:
+        paged_url = f"{url}&offset={offset}&length={limit}"
+        response = requests.get(paged_url)
+        response.raise_for_status()
+        page = response.json()
+
+        if "response" not in page or "data" not in page["response"]:
+            break
+
+        data_batch = page["response"]["data"]
+        if not data_batch:
+            break
+
+        all_data.extend(data_batch)
+        print(f"Fetched {len(data_batch)} records (offset: {offset})")
+
+        if len(data_batch) < limit:
+            break
+
+        offset += limit
+
+    # Replace the original 'data' field with the full result
+    result = {"response": {"data": all_data}}
 
     # Ensure data directory exists
     data_folder = get_data_folder()
@@ -20,11 +45,18 @@ def fetch_and_store_json(url: str, filename: str) -> dict:
     # Save to a fixed file (overwrites each time)
     filepath = os.path.join(data_folder, f"{filename}.json")
     with open(filepath, 'w') as f:
-        json.dump(data, f, indent=2)
+        json.dump(result, f, indent=2)
 
     print(f"EIA data saved to: {filepath}")
-    return data
+    return result
 
+def brent_price():
+    url = f"https://api.eia.gov/v2/petroleum/pri/spt/data/?api_key={EIA}&frequency=daily&data[0]=value&facets[series][]=RBRTE&sort[0][column]=period&sort[0][direction]=desc"
+    return fetch_and_store_json(url, "brent_price")
+
+def WTI_price():
+    url = f"https://api.eia.gov/v2/petroleum/pri/spt/data/?api_key={EIA}&frequency=daily&data[0]=value&facets[series][]=RWTC&sort[0][column]=period&sort[0][direction]=desc"
+    return fetch_and_store_json(url, "WTI_price")
 
 def opec_production():
     url = f"https://api.eia.gov/v2/international/data/?api_key={EIA}&frequency=monthly&data[0]=value&facets[activityId][]=1&facets[productId][]=57&facets[countryRegionId][]=OPEC&facets[unit][]=TBPD&sort[0][column]=period&sort[0][direction]=desc&offset=0&length=5000"
@@ -62,16 +94,6 @@ def usa_from_nopec():
     url = f"https://api.eia.gov/v2/petroleum/move/impcus/data/?api_key={EIA}&frequency=monthly&data[0]=value&facets[series][]=MTTIMUSVV1&sort[0][column]=period&sort[0][direction]=desc&offset=0&length=5000"
     return fetch_and_store_json(url, "usa_from_nopec")
 
-def WTI_price():
-    url = f"https://api.eia.gov/v2/petroleum/pri/spt/data/?api_key={EIA}&frequency=daily&data[0]=value&facets[series][]=RWTC&sort[0][column]=period&sort[0][direction]=desc&offset=0&length=5000"
-    return fetch_and_store_json(url, "WTI_price")
-
-def brent_price():
-    url = f"https://api.eia.gov/v2/petroleum/pri/spt/data/?api_key={EIA}&frequency=daily&data[0]=value&facets[series][]=RBRTE&sort[0][column]=period&sort[0][direction]=desc&offset=0&length=5000"
-    return fetch_and_store_json(url, "brent_price")
-
-def US_rig_count():
+def usa_rig_count():
     url = f"https://api.eia.gov/v2/natural-gas/enr/drill/data/?api_key={EIA}&frequency=monthly&data[0]=value&facets[series][]=E_ERTRR0_XR0_NUS_C&sort[0][column]=period&sort[0][direction]=desc&offset=0&length=5000"
     return fetch_and_store_json(url, "US_rig_count")
-
-brent_price()
