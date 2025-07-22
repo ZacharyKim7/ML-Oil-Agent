@@ -12,6 +12,9 @@ that can switch between pulling the data and processing it directly in memory, o
 the pipeline stores the data as a JSON first and then reads from the JSONs.
 """
 
+"""
+Begin EIA data integration
+"""
 def get_EIA_data_folder():
     return os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data/EIA')
 
@@ -71,7 +74,7 @@ def add_WTI_to_df(df, live_read = False):
     # Merge new_df into existing df by index
     return df.merge(new_df, how='outer', left_index=True, right_index=True)
 
-def add_OPEC_production_to_df(df, live_read = False, lag_days = 30):
+def add_OPEC_production_to_df(df, live_read = False, lag_days=30):
     """
     Adds a lagged monthly cumulative time series to a daily-indexed DataFrame.
     """
@@ -117,7 +120,7 @@ def add_OPEC_production_to_df(df, live_read = False, lag_days = 30):
     # Merge with the master DataFrame
     return df.merge(daily_df, how='left', left_index=True, right_index=True)
 
-def add_NOPEC_production_to_df(df, live_read = False, lag_days = 30):
+def add_NOPEC_production_to_df(df, live_read = False, lag_days=30):
     data = None
     if live_read:
         data = EIA.non_opec_production()
@@ -203,7 +206,7 @@ def add_OECD_Consumption_to_df(df, live_read=False, lag_days=30):
     # Merge with the master DataFrame
     return df.merge(daily_df, how='left', left_index=True, right_index=True)
 
-def add_China_Consumption_to_df(df, live_read=False, lag_days = 365):
+def add_China_Consumption_to_df(df, live_read=False, lag_days=365):
     data = None
     """
     Normally, the live_read function would allow for a live read.
@@ -252,7 +255,7 @@ def add_China_Consumption_to_df(df, live_read=False, lag_days = 365):
     # Merge with the master DataFrame
     return df.merge(daily_df, how='left', left_index=True, right_index=True)
 
-def add_India_Consumption_to_df(df, live_read=False, lag_days = 365):
+def add_India_Consumption_to_df(df, live_read=False, lag_days=365):
     data = None
     """
     Normally, the live_read function would allow for a live read.
@@ -301,7 +304,7 @@ def add_India_Consumption_to_df(df, live_read=False, lag_days = 365):
     # Merge with the master DataFrame
     return df.merge(daily_df, how='left', left_index=True, right_index=True)
 
-def add_OECD_stocks_to_df(df, live_read=False, lag_days = 30):
+def add_OECD_stocks_to_df(df, live_read=False, lag_days=30):
     data = None
     if live_read:
         data = EIA.oecd_stocks()
@@ -344,7 +347,7 @@ def add_OECD_stocks_to_df(df, live_read=False, lag_days = 30):
     # Merge with the master DataFrame
     return df.merge(daily_df, how='left', left_index=True, right_index=True)
 
-def add_USA_stocks_to_df(df, live_read=False, lag_days = 30):
+def add_USA_stocks_to_df(df, live_read=False, lag_days=30):
     data = None
     if live_read:
         data = EIA.usa_stocks()
@@ -516,22 +519,113 @@ def add_USA_rig_count(df, live_read=False, lag_days=30):
     # Merge with the master DataFrame
     return df.merge(daily_df, how='left', left_index=True, right_index=True)
 
+"""
+Begin FRED data integration
+"""
+def add_CPI_to_df(df, live_read=False, lag_days=30):
+    data = None
+    if live_read:
+        data = FRED.get_CPI()
+    else:
+        data_folder = get_FRED_data_folder()
+        filepath = os.path.join(data_folder, f"CPI.json")
+        with open(filepath, 'r') as f:
+            data = json.load(f)
+
+    column_name = "CPI"
+    monthly_df = pd.DataFrame([
+        {
+            "Date": obs["date"],
+            column_name: float(obs["value"]) if obs["value"] not in ('', '.', None) else None
+        }
+        for obs in data["observations"]
+    ])
+    monthly_df["Date"] = pd.to_datetime(monthly_df["Date"])
+    monthly_df.set_index("Date", inplace=True)
+
+    # Fill entire month with same value
+    daily_entries = []
+    for month_start, row in monthly_df.iterrows():
+        if pd.isna(row[column_name]):
+            continue
+        month_end = month_start + MonthEnd(0)
+        days = pd.date_range(start=month_start, end=month_end)
+        for day in days:
+            daily_entries.append({
+                "Date": day + pd.Timedelta(days=lag_days),  # Apply 30-day lag
+                column_name: row[column_name]
+            })
+
+    daily_df = pd.DataFrame(daily_entries)
+    daily_df.set_index("Date", inplace=True)
+
+    # Trim to match master DataFrame's date range
+    daily_df = daily_df.reindex(df.index)
+
+    # Merge with the master DataFrame
+    return df.merge(daily_df, how='left', left_index=True, right_index=True)
+
+def add_GDP_growth_to_df(df, live_read=False, lag_days=30):
+    data = None
+    if live_read:
+        data = FRED.get_GDP_growth()
+    else:
+        data_folder = get_FRED_data_folder()
+        filepath = os.path.join(data_folder, f"GDP_growth.json")
+        with open(filepath, 'r') as f:
+            data = json.load(f)
+
+    column_name = "GDP (yoy%)"
+    monthly_df = pd.DataFrame([
+        {
+            "Date": obs["date"],
+            column_name: float(obs["value"]) if obs["value"] not in ('', '.', None) else None
+        }
+        for obs in data["observations"]
+    ])
+    monthly_df["Date"] = pd.to_datetime(monthly_df["Date"])
+    monthly_df.set_index("Date", inplace=True)
+
+    # Fill entire month with same value
+    daily_entries = []
+    for month_start, row in monthly_df.iterrows():
+        if pd.isna(row[column_name]):
+            continue
+        month_end = month_start + MonthEnd(0)
+        days = pd.date_range(start=month_start, end=month_end)
+        for day in days:
+            daily_entries.append({
+                "Date": day + pd.Timedelta(days=lag_days),  # Apply 30-day lag
+                column_name: row[column_name]
+            })
+
+    daily_df = pd.DataFrame(daily_entries)
+    daily_df.set_index("Date", inplace=True)
+
+    # Trim to match master DataFrame's date range
+    daily_df = daily_df.reindex(df.index)
+
+    # Merge with the master DataFrame
+    return df.merge(daily_df, how='left', left_index=True, right_index=True)
+
 # Controls whether API data is stored as JSON and read, or pulled and processed directly in memory
 handle_in_memory = False
 
 master = (
     tabulate_brent_price(handle_in_memory)
-    .pipe(add_WTI_to_df, live_read=handle_in_memory)
-    .pipe(add_OPEC_production_to_df, live_read=handle_in_memory, lag_days=30)
-    .pipe(add_NOPEC_production_to_df, live_read=handle_in_memory, lag_days=30)
-    .pipe(add_OECD_Consumption_to_df, live_read=handle_in_memory, lag_days=30)
-    .pipe(add_China_Consumption_to_df, live_read=handle_in_memory, lag_days=365)
-    .pipe(add_India_Consumption_to_df, live_read=handle_in_memory, lag_days=365)
-    .pipe(add_OECD_stocks_to_df, live_read=handle_in_memory, lag_days=30)
-    .pipe(add_USA_stocks_to_df, live_read=handle_in_memory, lag_days=30)
-    .pipe(add_USA_from_OPEC, live_read=handle_in_memory, lag_days=30)
-    .pipe(add_USA_from_NOPEC, live_read=handle_in_memory, lag_days=30)
-    .pipe(add_USA_rig_count, live_read=handle_in_memory, lag_days=30)
+    # .pipe(add_WTI_to_df, live_read=handle_in_memory)
+    # .pipe(add_OPEC_production_to_df, live_read=handle_in_memory, lag_days=30)
+    # .pipe(add_NOPEC_production_to_df, live_read=handle_in_memory, lag_days=30)
+    # .pipe(add_OECD_Consumption_to_df, live_read=handle_in_memory, lag_days=30)
+    # .pipe(add_China_Consumption_to_df, live_read=handle_in_memory, lag_days=365)
+    # .pipe(add_India_Consumption_to_df, live_read=handle_in_memory, lag_days=365)
+    # .pipe(add_OECD_stocks_to_df, live_read=handle_in_memory, lag_days=30)
+    # .pipe(add_USA_stocks_to_df, live_read=handle_in_memory, lag_days=30)
+    # .pipe(add_USA_from_OPEC, live_read=handle_in_memory, lag_days=30)
+    # .pipe(add_USA_from_NOPEC, live_read=handle_in_memory, lag_days=30)
+    # .pipe(add_USA_rig_count, live_read=handle_in_memory, lag_days=30)
+    .pipe(add_CPI_to_df, live_read=handle_in_memory, lag_days=30)
+    .pipe(add_GDP_growth_to_df, live_read=True, lag_days=30)
 )
 
 print(master)

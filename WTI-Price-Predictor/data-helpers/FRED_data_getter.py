@@ -32,6 +32,6 @@ def get_inflation_rates():
 def get_GDP_growth():
     return save_fred_data("A191RL1Q225SBEA", "GDP_growth")
 
-get_CPI()
-get_inflation_rates()
-get_GDP_growth()
+# get_CPI()
+# get_inflation_rates()
+# get_GDP_growth()
