@@ -12,9 +12,7 @@ that can switch between pulling the data and processing it directly in memory, o
 the pipeline stores the data as a JSON first and then reads from the JSONs.
 """
 
-"""
-Begin EIA data integration
-"""
+
 def get_EIA_data_folder():
     return os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data/EIA')
 
@@ -27,20 +25,24 @@ def get_FRED_data_folder():
 def get_Yahoo_data_folder():
     return os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data/Yahoo')
 
-def tabulate_brent_price(live_read = False):
+"""
+Begin EIA data integration
+Dataframe is built around WTI spot prices
+"""
+def tabulate_WTI_price(live_read=False):
     data = None
     if live_read:
-        data = EIA.brent_price()
+        data = EIA.WTI_price()
     else:
         data_folder = get_EIA_data_folder()
-        filepath = os.path.join(data_folder, f"brent_price.json")
+        filepath = os.path.join(data_folder, f"WTI_price.json")
         with open(filepath, 'r') as f:
             data = json.load(f)
 
     df = pd.DataFrame([
     {
         "Date": item["period"],
-        "Brent ($/bbl)": float(item["value"])
+        "WTI ($/bbl)": float(item["value"])
     }
     for item in data["response"]["data"]
     ])
@@ -51,13 +53,13 @@ def tabulate_brent_price(live_read = False):
 
     return df
 
-def add_WTI_to_df(df, live_read = False):
+def add_Brent_to_df(df, live_read=False):
     data = None
     if live_read:
-        data = EIA.WTI_price()
+        data = EIA.brent_price()
     else:
         data_folder = get_EIA_data_folder()
-        filepath = os.path.join(data_folder, f"WTI_price.json")
+        filepath = os.path.join(data_folder, f"brent_price.json")
         with open(filepath, 'r') as f:
             data = json.load(f)
 
@@ -72,9 +74,9 @@ def add_WTI_to_df(df, live_read = False):
     new_df.set_index("Date", inplace=True)
 
     # Merge new_df into existing df by index
-    return df.merge(new_df, how='outer', left_index=True, right_index=True)
+    return df.merge(new_df, how='left', left_index=True, right_index=True)
 
-def add_OPEC_production_to_df(df, live_read = False, lag_days=30):
+def add_OPEC_production_to_df(df, live_read=False, lag_days=30):
     """
     Adds a lagged monthly cumulative time series to a daily-indexed DataFrame.
     """
@@ -120,7 +122,7 @@ def add_OPEC_production_to_df(df, live_read = False, lag_days=30):
     # Merge with the master DataFrame
     return df.merge(daily_df, how='left', left_index=True, right_index=True)
 
-def add_NOPEC_production_to_df(df, live_read = False, lag_days=30):
+def add_NOPEC_production_to_df(df, live_read=False, lag_days=30):
     data = None
     if live_read:
         data = EIA.non_opec_production()
@@ -629,25 +631,124 @@ def add_GDP_growth_to_df(df, live_read=False, lag_quarters=1):
     daily_df = daily_df.reindex(df.index)  # Now safe
     return df.merge(daily_df, how="left", left_index=True, right_index=True)
 
+def add_USD_GBP(df, live_read=False):
+    data = None
+    if live_read:
+        data = FRED.get_USD_GBP()
+    else:
+        data_folder = get_FRED_data_folder()
+        filepath = os.path.join(data_folder, f"USD-GBP.json")
+        with open(filepath, 'r') as f:
+            data = json.load(f)
+
+    # Convert JSON observations into a DataFrame
+    new_df = pd.DataFrame([
+        {
+            "Date": item["date"],
+            "USD-GBP": float(item["value"]) if item["value"] not in ('', '.', None) else None
+        }
+        for item in data["observations"]
+    ])
+    new_df["Date"] = pd.to_datetime(new_df["Date"])
+    new_df.set_index("Date", inplace=True)
+
+    # Merge and forward-fill missing USD-GBP values
+    merged = df.merge(new_df, how='left', left_index=True, right_index=True)
+    merged["USD-GBP"] = merged["USD-GBP"].ffill()
+
+    return merged
+
+def add_USD_YEN(df, live_read=False):
+    data = None
+    if live_read:
+        data = FRED.get_USD_YEN()
+    else:
+        data_folder = get_FRED_data_folder()
+        filepath = os.path.join(data_folder, f"USD-YEN.json")
+        with open(filepath, 'r') as f:
+            data = json.load(f)
+
+    # Convert JSON observations into a DataFrame
+    new_df = pd.DataFrame([
+        {
+            "Date": item["date"],
+            "USD-YEN": float(item["value"]) if item["value"] not in ('', '.', None) else None
+        }
+        for item in data["observations"]
+    ])
+    new_df["Date"] = pd.to_datetime(new_df["Date"])
+    new_df.set_index("Date", inplace=True)
+
+    # Merge and forward-fill missing USD-GBP values
+    merged = df.merge(new_df, how='left', left_index=True, right_index=True)
+    merged["USD-YEN"] = merged["USD-YEN"].ffill()
+
+    return merged
+
+"""
+Begin World Bank data integration
+"""
+def add_world_population(df, live_read=False, lag_days=365):
+    population = WB.parse_population_data(live_read)
+
+    population["Year"] = pd.to_datetime(population["Year"])
+    population.set_index("Year", inplace=True)
+
+    column_name = "Population"
+    # Fill entire year with same value, and shift by lag_days
+    daily_entries = []
+    for year_start, row in population.iterrows():
+        if pd.isna(row[column_name]):
+            continue
+        year_end = year_start + pd.DateOffset(years=1) - pd.Timedelta(days=1)
+        days = pd.date_range(start=year_start, end=year_end)
+        for day in days:
+            daily_entries.append({
+                "Date": day + pd.Timedelta(days=lag_days),
+                column_name: row[column_name]
+            })
+
+    daily_df = pd.DataFrame(daily_entries)
+    daily_df.set_index("Date", inplace=True)
+
+    # Trim to match master DataFrame's date range
+    daily_df = daily_df.reindex(df.index)
+
+    # Merge with the master DataFrame
+    return df.merge(daily_df, how="left", left_index=True, right_index=True)
 
 # Controls whether API data is stored as JSON and read, or pulled and processed directly in memory
-handle_in_memory = False
+handle_in_memory = True
 
-master = (
-    tabulate_brent_price(handle_in_memory)
-    # .pipe(add_WTI_to_df, live_read=handle_in_memory)
-    # .pipe(add_OPEC_production_to_df, live_read=handle_in_memory, lag_days=30)
-    # .pipe(add_NOPEC_production_to_df, live_read=handle_in_memory, lag_days=30)
-    # .pipe(add_OECD_Consumption_to_df, live_read=handle_in_memory, lag_days=30)
-    # .pipe(add_China_Consumption_to_df, live_read=handle_in_memory, lag_days=365)
-    # .pipe(add_India_Consumption_to_df, live_read=handle_in_memory, lag_days=365)
-    # .pipe(add_OECD_stocks_to_df, live_read=handle_in_memory, lag_days=30)
-    # .pipe(add_USA_stocks_to_df, live_read=handle_in_memory, lag_days=30)
-    # .pipe(add_USA_from_OPEC, live_read=handle_in_memory, lag_days=30)
-    # .pipe(add_USA_from_NOPEC, live_read=handle_in_memory, lag_days=30)
-    # .pipe(add_USA_rig_count, live_read=handle_in_memory, lag_days=30)
-    # .pipe(add_CPI_to_df, live_read=handle_in_memory, lag_days=30)
-    .pipe(add_GDP_growth_to_df, live_read=handle_in_memory, lag_quarters=1)
-)
+def get_combined_oil_df(save=True):
+    master = (
+        tabulate_WTI_price(handle_in_memory)
+        .pipe(add_Brent_to_df, live_read=handle_in_memory)
+        .pipe(add_OPEC_production_to_df, live_read=handle_in_memory, lag_days=30)
+        .pipe(add_NOPEC_production_to_df, live_read=handle_in_memory, lag_days=30)
+        .pipe(add_OECD_Consumption_to_df, live_read=handle_in_memory, lag_days=30)
+        .pipe(add_China_Consumption_to_df, live_read=handle_in_memory, lag_days=365)
+        .pipe(add_India_Consumption_to_df, live_read=handle_in_memory, lag_days=365)
+        .pipe(add_OECD_stocks_to_df, live_read=handle_in_memory, lag_days=30)
+        .pipe(add_USA_stocks_to_df, live_read=handle_in_memory, lag_days=30)
+        .pipe(add_USA_from_OPEC, live_read=handle_in_memory, lag_days=30)
+        .pipe(add_USA_from_NOPEC, live_read=handle_in_memory, lag_days=30)
+        .pipe(add_USA_rig_count, live_read=handle_in_memory, lag_days=30)
+        .pipe(add_CPI_to_df, live_read=handle_in_memory, lag_days=30)
+        .pipe(add_GDP_growth_to_df, live_read=handle_in_memory, lag_quarters=1)
+        .pipe(add_USD_GBP, live_read=handle_in_memory)
+        .pipe(add_USD_YEN, live_read=handle_in_memory)
+        .pipe(add_world_population, live_read=handle_in_memory, lag_days=365)
+    )
 
-print(master)
+    if save:
+        # Save the DataFrame to data/combined_oil_df.csv, overwriting if it exists
+        output_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data')
+        output_path = os.path.join(output_dir, 'combined_oil_df.csv')
+        master.to_csv(output_path)
+        print("Successfully saved combined oil data to data/combined_oil_df.csv")
+
+    return master
+
+# print(master.isna().any(axis=1).sum())
+print(get_combined_oil_df(True))

@@ -32,6 +32,19 @@ def get_inflation_rates():
 def get_GDP_growth():
     return save_fred_data("A191RL1Q225SBEA", "GDP_growth")
 
+# starts from 1999, only include if needed.
+def get_USD_EUD():
+    return save_fred_data("DEXUSEU", "USD-EUD")
+
+def get_USD_GBP():
+    return save_fred_data("DEXUSUK", "USD-GBP")
+
+def get_USD_YEN():
+    return save_fred_data("DEXJPUS", "USD-YEN")
+
 # get_CPI()
 # get_inflation_rates()
 # get_GDP_growth()
+# get_USD_EUD()
+# get_USD_GBP()
+# get_USD_YEN()
