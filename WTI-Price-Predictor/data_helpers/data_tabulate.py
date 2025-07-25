@@ -718,7 +718,7 @@ def add_world_population(df, live_read=False, lag_days=365):
     return df.merge(daily_df, how="left", left_index=True, right_index=True)
 
 # Controls whether API data is stored as JSON and read, or pulled and processed directly in memory
-handle_in_memory = True
+handle_in_memory = False
 
 def get_combined_oil_df(save=True):
     master = (
@@ -750,5 +750,11 @@ def get_combined_oil_df(save=True):
 
     return master
 
+def get_data_from_csv():
+    return pd.read_csv(os.path.join(os.path.dirname(os.path.dirname(__file__)), "data/combined_oil_df.csv"))
+
+def test():
+    return "hi"
+
 # print(master.isna().any(axis=1).sum())
-print(get_combined_oil_df(True))
+print(get_combined_oil_df(False))
