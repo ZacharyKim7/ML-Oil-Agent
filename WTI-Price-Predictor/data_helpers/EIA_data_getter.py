@@ -97,3 +97,7 @@ def usa_from_nopec():
 def usa_rig_count():
     url = f"https://api.eia.gov/v2/natural-gas/enr/drill/data/?api_key={EIA}&frequency=monthly&data[0]=value&facets[series][]=E_ERTRR0_XR0_NUS_C&sort[0][column]=period&sort[0][direction]=desc&offset=0&length=5000"
     return fetch_and_store_json(url, "US_rig_count")
+
+def usa_net_imports():
+    url = f"https://api.eia.gov/v2/petroleum/move/neti/data/?api_key={EIA}&frequency=monthly&data[0]=value&facets[series][]=MTTNTUS2&sort[0][column]=period&sort[0][direction]=desc&offset=0&length=5000"
+    return fetch_and_store_json(url, "usa_net_imports")

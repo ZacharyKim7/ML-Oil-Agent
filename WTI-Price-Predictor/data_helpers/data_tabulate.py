@@ -1,7 +1,7 @@
-import EIA_data_getter as EIA
-import FRED_data_getter as FRED
-import WB_data_getter as WB
-import yahoo_data_getter as Yahoo
+from . import EIA_data_getter as EIA
+from . import FRED_data_getter as FRED
+from . import WB_data_getter as WB
+from . import yahoo_data_getter as Yahoo
 import pandas as pd, os, json
 from pandas.tseries.offsets import MonthEnd, QuarterEnd
 
@@ -66,15 +66,18 @@ def add_Brent_to_df(df, live_read=False):
     new_df = pd.DataFrame([
     {
         "Date": item["period"],
-        "WTI ($/bbl)": float(item["value"])  # different column name
+        "Brent ($/bbl)": float(item["value"])  # different column name
     }
     for item in data["response"]["data"]
     ])
     new_df["Date"] = pd.to_datetime(new_df["Date"])
     new_df.set_index("Date", inplace=True)
 
-    # Merge new_df into existing df by index
-    return df.merge(new_df, how='left', left_index=True, right_index=True)
+    # Merge and forward-fill missing USD-GBP values
+    merged = df.merge(new_df, how='left', left_index=True, right_index=True)
+    merged["Brent ($/bbl)"] = merged["Brent ($/bbl)"].ffill()
+
+    return merged
 
 def add_OPEC_production_to_df(df, live_read=False, lag_days=30):
     """
@@ -478,6 +481,49 @@ def add_USA_from_NOPEC(df, live_read=False, lag_days=30):
     # Merge with the master DataFrame
     return df.merge(daily_df, how='left', left_index=True, right_index=True)
 
+def add_USA_net_imports(df, live_read=False, lag_days=30):
+    data = None
+    if live_read:
+        data = EIA.usa_net_imports()
+    else:
+        data_folder = get_EIA_data_folder()
+        filepath = os.path.join(data_folder, f"usa_net_imports.json")
+        with open(filepath, 'r') as f:
+            data = json.load(f)
+
+    column_name = "US net imports (tbbl/d)"
+    monthly_df = pd.DataFrame([
+        {
+            "Date": item["period"] + "-01",
+            column_name: float(item["value"]) if item["value"] not in ('', '.', None) else ""
+        }
+        for item in data["response"]["data"]
+    ])
+    monthly_df["Date"] = pd.to_datetime(monthly_df["Date"])
+    monthly_df.set_index("Date", inplace=True)
+
+    # Fill entire month with same value
+    daily_entries = []
+    for month_start, row in monthly_df.iterrows():
+        if pd.isna(row[column_name]):
+            continue
+        month_end = month_start + MonthEnd(0)
+        days = pd.date_range(start=month_start, end=month_end)
+        for day in days:
+            daily_entries.append({
+                "Date": day + pd.Timedelta(days=lag_days),  # Apply 30-day lag
+                column_name: row[column_name]
+            })
+
+    daily_df = pd.DataFrame(daily_entries)
+    daily_df.set_index("Date", inplace=True)
+
+    # Trim to match master DataFrame's date range
+    daily_df = daily_df.reindex(df.index)
+
+    # Merge with the master DataFrame
+    return df.merge(daily_df, how='left', left_index=True, right_index=True)
+
 def add_USA_rig_count(df, live_read=False, lag_days=30):
     data = None
     if live_read:
@@ -629,7 +675,12 @@ def add_GDP_growth_to_df(df, live_read=False, lag_quarters=1):
 
     # Align and merge
     daily_df = daily_df.reindex(df.index)  # Now safe
-    return df.merge(daily_df, how="left", left_index=True, right_index=True)
+
+    # Merge and forward-fill missing GDP values
+    merged = df.merge(daily_df, how='left', left_index=True, right_index=True)
+    merged[column_name] = merged[column_name].ffill()
+
+    return merged
 
 def add_USD_GBP(df, live_read=False):
     data = None
@@ -679,7 +730,7 @@ def add_USD_YEN(df, live_read=False):
     new_df["Date"] = pd.to_datetime(new_df["Date"])
     new_df.set_index("Date", inplace=True)
 
-    # Merge and forward-fill missing USD-GBP values
+    # Merge and forward-fill missing USD-YEN values
     merged = df.merge(new_df, how='left', left_index=True, right_index=True)
     merged["USD-YEN"] = merged["USD-YEN"].ffill()
 
@@ -731,14 +782,17 @@ def get_combined_oil_df(save=True):
         .pipe(add_India_Consumption_to_df, live_read=handle_in_memory, lag_days=365)
         .pipe(add_OECD_stocks_to_df, live_read=handle_in_memory, lag_days=30)
         .pipe(add_USA_stocks_to_df, live_read=handle_in_memory, lag_days=30)
-        .pipe(add_USA_from_OPEC, live_read=handle_in_memory, lag_days=30)
-        .pipe(add_USA_from_NOPEC, live_read=handle_in_memory, lag_days=30)
+        .pipe(add_USA_net_imports, live_read=True, lag_days=30)
         .pipe(add_USA_rig_count, live_read=handle_in_memory, lag_days=30)
         .pipe(add_CPI_to_df, live_read=handle_in_memory, lag_days=30)
         .pipe(add_GDP_growth_to_df, live_read=handle_in_memory, lag_quarters=1)
         .pipe(add_USD_GBP, live_read=handle_in_memory)
         .pipe(add_USD_YEN, live_read=handle_in_memory)
         .pipe(add_world_population, live_read=handle_in_memory, lag_days=365)
+
+        # OPEC and non-OPEC oil imports have been excluded in favor of USA net imports.
+        # .pipe(add_USA_from_OPEC, live_read=handle_in_memory, lag_days=30)
+        # .pipe(add_USA_from_NOPEC, live_read=handle_in_memory, lag_days=30)
     )
 
     if save:
@@ -756,5 +810,6 @@ def get_data_from_csv():
 def test():
     return "hi"
 
-# print(master.isna().any(axis=1).sum())
-print(get_combined_oil_df(False))
+# print(get_data_from_csv())
+# print(get_combined_oil_df(True))
+# print(test())
