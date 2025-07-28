@@ -1,6 +1,16 @@
 # ML-Oil-Agent
 A machine learning agent that predicts the changes in revenue for oil service companies.
 
+## How to run:
+
+```
+\WTI-Price-Predictor$ python -m main
+```
+
+```
+\WTI-Price-Predictor$ python -m data_helpers.data_tabulate
+```
+
 ## Data Sources
 
 * EIA
