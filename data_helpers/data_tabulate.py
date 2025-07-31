@@ -807,9 +807,19 @@ def get_combined_oil_df(save=True):
 def get_data_from_csv():
     return pd.read_csv(os.path.join(os.path.dirname(os.path.dirname(__file__)), "data/combined_oil_df.csv"))
 
-def test():
-    return "hi"
+def fix_USD_YEN_type():
+    # Get the CSV path
+    csv_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data/combined_oil_df.csv")
 
-# print(get_data_from_csv())
-# print(get_combined_oil_df(True))
-# print(test())
+    # Load the DataFrame
+    df = pd.read_csv(csv_path)
+
+    # Convert USD-YEN to float64
+    df["USD-YEN"] = pd.to_numeric(df["USD-YEN"], errors="coerce")
+
+    # (Optional) Confirm the dtype is now float64
+    print(df["USD-YEN"].dtype)  # Should print 'float64'
+
+    # Write the updated DataFrame back to the same CSV
+    df.to_csv(csv_path, index=False)
+
