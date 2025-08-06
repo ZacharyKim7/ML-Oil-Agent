@@ -9,3 +9,6 @@ yfinance
 scikit-learn
 matplotlib
 xgboost
+
+lightgbm
+seaborn
