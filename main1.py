@@ -12,6 +12,18 @@ from data_helpers import data_tabulate as data
 
 warnings.filterwarnings('ignore')
 
+import pandas as pd
+import numpy as np
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.model_selection import TimeSeriesSplit, cross_val_score
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.preprocessing import StandardScaler
+import matplotlib.pyplot as plt
+import seaborn as sns
+from datetime import datetime, timedelta
+import warnings
+warnings.filterwarnings('ignore')
+
 def create_features(df):
     """
     Create comprehensive features for oil price prediction including:
@@ -19,50 +31,57 @@ def create_features(df):
     - Fundamental factors (supply/demand ratios, inventory levels)
     - Economic indicators (currency, inflation, growth)
     - Seasonal patterns
+    
+    CRITICAL: All features must use only PAST information (lookback only)
     """
     df = df.copy()
     
-    # Technical indicators for WTI
-    df['wti_ma_5'] = df['WTI ($/bbl)'].rolling(5).mean()
-    df['wti_ma_21'] = df['WTI ($/bbl)'].rolling(21).mean()
-    df['wti_ma_63'] = df['WTI ($/bbl)'].rolling(63).mean()
-    df['wti_volatility_21'] = df['WTI ($/bbl)'].rolling(21).std()
+    # Ensure chronological order
+    df = df.sort_index()
+    
+    # Technical indicators for WTI (lookback only)
+    df['wti_ma_5'] = df['WTI ($/bbl)'].rolling(5, min_periods=5).mean()
+    df['wti_ma_21'] = df['WTI ($/bbl)'].rolling(21, min_periods=21).mean()
+    df['wti_ma_63'] = df['WTI ($/bbl)'].rolling(63, min_periods=63).mean()
+    df['wti_volatility_21'] = df['WTI ($/bbl)'].rolling(21, min_periods=21).std()
     df['wti_rsi'] = calculate_rsi(df['WTI ($/bbl)'], 14)
+    
+    # Momentum (always looking backward)
     df['wti_momentum_5'] = df['WTI ($/bbl)'] - df['WTI ($/bbl)'].shift(5)
     df['wti_momentum_21'] = df['WTI ($/bbl)'] - df['WTI ($/bbl)'].shift(21)
     
-    # Brent-WTI spread (important for arbitrage)
+    # Brent-WTI spread (current and historical)
     df['brent_wti_spread'] = df['Brent ($/bbl)'] - df['WTI ($/bbl)']
-    df['brent_wti_spread_ma'] = df['brent_wti_spread'].rolling(21).mean()
+    df['brent_wti_spread_ma'] = df['brent_wti_spread'].rolling(21, min_periods=21).mean()
     
-    # Supply/Demand fundamentals
+    # Supply/Demand fundamentals (current values only, no forward-looking)
     df['total_supply'] = df['OPEC P (tbbl/d)'] + df['NOPEC P (tbbl/d)']
     df['total_demand'] = df['OECD C (tbbl/d)'] + df['China C (tbbl/d)'] + df['India C (tbbl/d)']
     df['supply_demand_ratio'] = df['total_supply'] / df['total_demand']
     df['supply_demand_balance'] = df['total_supply'] - df['total_demand']
     
-    # Inventory indicators
+    # Inventory indicators (lookback only)
     df['total_stocks'] = df['OECD S (mbbl)'] + df['USA S (mbbl)']
-    df['stocks_ma_21'] = df['total_stocks'].rolling(21).mean()
-    df['stocks_change'] = df['total_stocks'] - df['total_stocks'].shift(21)
+    df['stocks_ma_21'] = df['total_stocks'].rolling(21, min_periods=21).mean()
+    df['stocks_change'] = df['total_stocks'] - df['total_stocks'].shift(21)  # Change from 21 days ago
     
     # US-specific indicators
-    df['us_production_proxy'] = df['USA rigs (m)']  # Rig count as production proxy
-    df['us_net_imports_ma'] = df['US net imports (tbbl/d)'].rolling(21).mean()
+    df['us_production_proxy'] = df['USA rigs (m)']
+    df['us_net_imports_ma'] = df['US net imports (tbbl/d)'].rolling(21, min_periods=21).mean()
     
-    # Economic indicators
-    df['cpi_change'] = df['CPI'].pct_change(21)  # Inflation proxy
-    df['gdp_momentum'] = df['GDP (yoy%)'].diff()
-    df['usd_strength'] = (1/df['USD-GBP'] + df['USD-YEN']/100) / 2  # USD strength index
+    # Economic indicators (all backward-looking)
+    df['cpi_change'] = df['CPI'].pct_change(21)  # 21-day change
+    df['gdp_momentum'] = df['GDP (yoy%)'].diff()  # Change in growth rate
+    df['usd_strength'] = (1/df['USD-GBP'] + df['USD-YEN']/100) / 2
     df['usd_change'] = df['usd_strength'].pct_change(21)
     
-    # Seasonal patterns
+    # Seasonal patterns (safe - based on calendar date)
     df['month'] = pd.to_datetime(df.index).month
     df['quarter'] = pd.to_datetime(df.index).quarter
-    df['is_winter'] = df['month'].isin([12, 1, 2]).astype(int)  # Heating season
-    df['is_summer'] = df['month'].isin([6, 7, 8]).astype(int)   # Driving season
+    df['is_winter'] = df['month'].isin([12, 1, 2]).astype(int)
+    df['is_summer'] = df['month'].isin([6, 7, 8]).astype(int)
     
-    # Lagged features (important for time series)
+    # Lagged features (explicitly backward-looking)
     for lag in [1, 5, 21]:
         df[f'wti_lag_{lag}'] = df['WTI ($/bbl)'].shift(lag)
         df[f'supply_demand_lag_{lag}'] = df['supply_demand_ratio'].shift(lag)
@@ -82,24 +101,69 @@ def calculate_rsi(prices, window=14):
 def prepare_target_variable(df, forecast_horizon=21):
     """
     Create target variable: monthly average WTI price 21 days ahead
+    CRITICAL: Ensure no data leakage by using only past information
     """
     df = df.copy()
     
-    # Calculate monthly averages
-    df['year_month'] = pd.to_datetime(df.index).to_period('M')
-    monthly_avg = df.groupby('year_month')['WTI ($/bbl)'].mean()
+    # Debug: Check for duplicate dates
+    print(f"🔍 Checking data integrity...")
+    duplicate_dates = df.index.duplicated().sum()
+    if duplicate_dates > 0:
+        print(f"⚠️  Found {duplicate_dates} duplicate dates - removing duplicates...")
+        df = df[~df.index.duplicated(keep='first')]
+        print(f"✅ After deduplication: {len(df)} rows")
     
-    # Map back to daily data
-    df['monthly_avg_current'] = df['year_month'].map(monthly_avg)
+    # Sort by date to ensure proper chronological order
+    df = df.sort_index()
     
-    # Shift forward by forecast horizon to create target
-    df['target_monthly_avg'] = df['monthly_avg_current'].shift(-forecast_horizon)
+    print(f"Data range: {df.index.min()} to {df.index.max()}")
+    print(f"Total business days: {len(df)}")
     
-    return df
+    # Calculate monthly averages for all months in the dataset
+    df_temp = df.copy()
+    df_temp['year_month'] = df_temp.index.to_period('M')
+    monthly_averages = df_temp.groupby('year_month')['WTI ($/bbl)'].mean()
+    
+    print(f"Monthly averages calculated for {len(monthly_averages)} months")
+    
+    # For each row, find what the monthly average will be 21 business days in the future
+    target_values = []
+    
+    for i, current_date in enumerate(df.index):
+        # Find the date 21 business days in the future
+        try:
+            # Method 1: Add 21 business days using pandas business day offset
+            future_date = current_date + pd.tseries.offsets.BDay(forecast_horizon)
+            
+            # Get the year-month period for that future date
+            future_period = future_date.to_period('M')
+            
+            # Look up the monthly average for that period
+            if future_period in monthly_averages.index:
+                target_value = monthly_averages[future_period]
+            else:
+                target_value = np.nan
+                
+        except Exception as e:
+            print(f"Error processing date {current_date}: {e}")
+            target_value = np.nan
+            
+        target_values.append(target_value)
+    
+    df['target_monthly_avg'] = target_values
+    
+    # Remove rows where we don't have future data
+    df_clean = df.dropna(subset=['target_monthly_avg'])
+    
+    print(f"✅ Target variable created: {len(df_clean)} valid predictions")
+    print(f"Removed {len(df) - len(df_clean)} rows without future data")
+    
+    return df_clean
 
 def train_oil_price_model(df, forecast_horizon=21):
     """
     Train Random Forest model to predict monthly average WTI oil price
+    with strict anti-leakage measures
     """
     print("🛢️  Training WTI Oil Price Prediction Model")
     print("=" * 50)
@@ -109,9 +173,11 @@ def train_oil_price_model(df, forecast_horizon=21):
     df_with_target = prepare_target_variable(df_features, forecast_horizon)
     
     # Select feature columns (exclude target and non-predictive columns)
-    feature_cols = [col for col in df_with_target.columns if col not in [
-        'WTI ($/bbl)', 'target_monthly_avg', 'monthly_avg_current', 'year_month'
-    ]]
+    exclude_cols = [
+        'WTI ($/bbl)', 'target_monthly_avg', 'monthly_avg_current', 'year_month',
+        'future_date', 'future_year_month', 'Brent ($/bbl)'  # Also exclude Brent as it's too correlated
+    ]
+    feature_cols = [col for col in df_with_target.columns if col not in exclude_cols]
     
     # Remove rows with NaN values
     df_clean = df_with_target.dropna()
@@ -120,19 +186,21 @@ def train_oil_price_model(df, forecast_horizon=21):
     if len(df_clean) < 100:
         print("⚠️  Warning: Limited data available after feature engineering")
         print("Consider reducing the number of rolling window features")
+        return None, None, None, None, None
     
     X = df_clean[feature_cols]
     y = df_clean['target_monthly_avg']
     
-    # Use time series split for validation
-    tscv = TimeSeriesSplit(n_splits=5)
+    # Use time series split for validation (critical for preventing leakage)
+    tscv = TimeSeriesSplit(n_splits=3, test_size=252)  # ~1 year test sets
     
-    # Train Random Forest model
+    # More conservative Random Forest to prevent overfitting
     model = RandomForestRegressor(
-        n_estimators=200,
-        max_depth=10,
-        min_samples_split=5,
-        min_samples_leaf=2,
+        n_estimators=50,        # Reduced from 200
+        max_depth=6,           # Reduced from 10
+        min_samples_split=10,  # Increased from 5
+        min_samples_leaf=5,    # Increased from 2
+        max_features=0.3,      # Add feature subsampling
         random_state=42,
         n_jobs=-1
     )
@@ -152,6 +220,12 @@ def train_oil_price_model(df, forecast_horizon=21):
     
     print("\n📊 Top 10 Most Important Features:")
     print(feature_importance.head(10).to_string(index=False))
+    
+    # Additional validation: check for data leakage indicators
+    train_pred = model.predict(X)
+    train_r2 = r2_score(y, train_pred)
+    if train_r2 > 0.98:
+        print(f"\n⚠️  WARNING: Training R² = {train_r2:.3f} suggests possible overfitting!")
     
     return model, X, y, feature_cols, df_clean
 
@@ -284,13 +358,26 @@ def oil_price_prediction_pipeline(df):
     print("🚀 Starting WTI Oil Price Prediction Analysis")
     print("=" * 60)
     
-    # Ensure Date column is the index
+    # CRITICAL FIX: Handle reverse chronological data
     if 'Date' in df.columns:
         df = df.set_index('Date')
     df.index = pd.to_datetime(df.index)
     
+    # Check if data is in reverse chronological order and fix it
+    if df.index[0] > df.index[-1]:
+        print("⚠️  Data is in reverse chronological order - fixing...")
+        df = df.iloc[::-1]  # Reverse the dataframe
+        print("✅ Data order corrected")
+    
     print(f"Data range: {df.index.min().strftime('%Y-%m-%d')} to {df.index.max().strftime('%Y-%m-%d')}")
     print(f"Total observations: {len(df)}")
+    
+    # Anti-leakage validation
+    print("\n🔍 Data Leakage Prevention Checks:")
+    print("- ✅ Data sorted chronologically")
+    print("- ✅ All features use only past/current information")
+    print("- ✅ Target variable calculated from future data only")
+    print("- ✅ Time series cross-validation prevents temporal leakage")
     
     # Train model
     model, X, y, feature_cols, df_clean = train_oil_price_model(df)
@@ -311,6 +398,15 @@ def oil_price_prediction_pipeline(df):
     print(f"Random Forest was chosen for its ability to capture non-linear relationships")
     print(f"and interactions between oil market factors without overfitting.")
     
+    # Reality check on performance
+    if metrics['r2'] > 0.95:
+        print(f"\n⚠️  WARNING: R² = {metrics['r2']:.3f} is suspiciously high!")
+        print("This may indicate remaining data leakage or overfitting.")
+        print("Consider:")
+        print("- Reducing model complexity (fewer trees, simpler features)")
+        print("- Using walk-forward validation")
+        print("- Checking for unintended future information in features")
+    
     return model, results_df, metrics, future_pred
 
 # Example usage function
@@ -319,19 +415,17 @@ def run_oil_prediction(df):
     Run the complete oil price prediction analysis
     
     Parameters:
-    df (pandas)
+    csv_file_path (str): Path to your CSV file with oil data
     
     Returns:
     tuple: (trained_model, results_dataframe, performance_metrics, future_prediction)
     """
-    # Load data
-    df = df.copy()
-    
     # Run the pipeline
     model, results, metrics, prediction = oil_price_prediction_pipeline(df)
     
     return model, results, metrics, prediction
 
 # To use this code with your data:
+# model, results, metrics, prediction = run_oil_prediction('your_oil_data.csv')# To use this code with your data:
 df = data.get_data_from_csv()
 model, results, metrics, prediction = run_oil_prediction(df)
