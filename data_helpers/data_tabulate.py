@@ -736,6 +736,22 @@ def add_USD_YEN(df, live_read=False):
 
     return merged
 
+def fix_USD_YEN_type():
+    # Get the CSV path
+    csv_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data/combined_oil_df.csv")
+
+    # Load the DataFrame
+    df = pd.read_csv(csv_path)
+
+    # Convert USD-YEN to float64
+    df["USD-YEN"] = pd.to_numeric(df["USD-YEN"], errors="coerce")
+
+    # (Optional) Confirm the dtype is now float64
+    print(df["USD-YEN"].dtype)  # Should print 'float64'
+
+    # Write the updated DataFrame back to the same CSV
+    df.to_csv(csv_path, index=False)
+
 """
 Begin World Bank data integration
 """
@@ -770,7 +786,6 @@ def add_world_population(df, live_read=False, lag_days=365):
 
 # Controls whether API data is stored as JSON and read, or pulled and processed directly in memory
 handle_in_memory = False
-
 def get_combined_oil_df(save=True):
     master = (
         tabulate_WTI_price(handle_in_memory)
@@ -804,22 +819,10 @@ def get_combined_oil_df(save=True):
 
     return master
 
+"""
+Function to get data stored in the combined_oil_df.csv rather than from the API.
+For use in development and testing.
+"""
 def get_data_from_csv():
     return pd.read_csv(os.path.join(os.path.dirname(os.path.dirname(__file__)), "data/combined_oil_df.csv"))
-
-def fix_USD_YEN_type():
-    # Get the CSV path
-    csv_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data/combined_oil_df.csv")
-
-    # Load the DataFrame
-    df = pd.read_csv(csv_path)
-
-    # Convert USD-YEN to float64
-    df["USD-YEN"] = pd.to_numeric(df["USD-YEN"], errors="coerce")
-
-    # (Optional) Confirm the dtype is now float64
-    print(df["USD-YEN"].dtype)  # Should print 'float64'
-
-    # Write the updated DataFrame back to the same CSV
-    df.to_csv(csv_path, index=False)
 
