@@ -407,17 +407,24 @@ def train_xgboost_quantile_forecast_model(df, target_column='WTI ($/bbl)', horiz
 def main():
     df = data.get_data_from_csv()
     df.dropna(inplace=True)
-    # df.drop(columns=["Brent ($/bbl)"], inplace=True)
-    # print(df.isna().any(axis=1).sum())
-    # print(df['USD-YEN'].dtype)
-    
-    # for col in df.columns:
-    #     print(f"{col}: {df[col].dtype}")
+                # df.drop(columns=["Brent ($/bbl)"], inplace=True)
+                # print(df.isna().any(axis=1).sum())
+                # print(df['USD-YEN'].dtype)
+                
+                # for col in df.columns:
+                #     print(f"{col}: {df[col].dtype}")
 
-    # models, preds, y_test = train_random_forest_forecast_model(df)
-    # models, preds, y_test = train_quantile_forecast_model(df, horizon=21)
-    # models, preds, y_test = train_quantile_forecast_model2(df, horizon=21)
-    train_xgboost_quantile_forecast_model(df)
+                # models, preds, y_test = train_random_forest_forecast_model(df)
+                # models, preds, y_test = train_quantile_forecast_model(df, horizon=21)
+                # models, preds, y_test = train_quantile_forecast_model2(df, horizon=21)
+    # train_xgboost_quantile_forecast_model(df)
+
+    df_new = data.add_stocks_to_df(df)
+    print(df_new.head())
+    # if 'Date' in df_new.columns:
+    #     print("hi")
+    # print(df_new.head())
+    # print(df.index)
 
     return 1
 

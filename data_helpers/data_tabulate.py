@@ -1,7 +1,7 @@
 from . import EIA_data_getter as EIA
 from . import FRED_data_getter as FRED
 from . import WB_data_getter as WB
-from . import yahoo_data_getter as Yahoo
+from . import yahoo_data_getter as YF
 import pandas as pd, os, json
 from pandas.tseries.offsets import MonthEnd, QuarterEnd
 
@@ -826,3 +826,17 @@ For use in development and testing.
 def get_data_from_csv():
     return pd.read_csv(os.path.join(os.path.dirname(os.path.dirname(__file__)), "data/combined_oil_df.csv"))
 
+"""
+Gets Yahoo stock data and appends it to a master data frame
+Used for secondary training of predictive models for stock prices.
+"""
+def add_stocks_to_df(df):
+    stocks = YF.get_stock_prices(stocks="SLB HAL BKR WFRD RIG FTI", start_date="1985-01-01", live_read=True, save=True)
+    master = df.copy()
+    master = df.set_index("Date")
+
+    # Trim to match master DataFrame's date range
+    stocks = stocks.reindex(master.index)
+
+    # Merge with the master DataFrame
+    return master.merge(stocks, how='left', left_index=True, right_index=True)
