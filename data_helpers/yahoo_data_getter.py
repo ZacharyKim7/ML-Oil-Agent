@@ -72,4 +72,4 @@ def get_exchange_rates(currencies="USDEUR=X USDGBP=X USDJPY=X", start_date="1985
     return data
 
 # print(get_closing_prices())
-print(get_stock_prices(live_read=False).head())
+# print(get_stock_prices(live_read=False).head())
