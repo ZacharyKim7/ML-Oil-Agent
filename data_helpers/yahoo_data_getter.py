@@ -70,6 +70,3 @@ def get_exchange_rates(currencies="USDEUR=X USDGBP=X USDJPY=X", start_date="1985
         data.to_csv(os.path.join(data_folder, "exchange_rates.csv"))
 
     return data
-
-# print(get_closing_prices())
-# print(get_stock_prices(live_read=False).head())
