@@ -831,7 +831,7 @@ Gets Yahoo stock data and appends it to a master data frame
 Used for secondary training of predictive models for stock prices.
 """
 def add_stocks_to_df(df):
-    stocks = YF.get_stock_prices(stocks="SLB HAL BKR", start_date="1985-01-01", live_read=True, save=True)
+    stocks = YF.get_stock_prices(stocks="SLB HAL", start_date="1985-01-01", live_read=False, save=True)
     master = df.copy()
     master = df.set_index("Date")
 
