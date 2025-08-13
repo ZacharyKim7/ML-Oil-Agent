@@ -4,6 +4,8 @@ from sklearn.ensemble import RandomForestRegressor
 from sklearn.model_selection import TimeSeriesSplit, cross_val_score
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.preprocessing import StandardScaler
+import matplotlib
+matplotlib.use('Agg')  # Use non-GUI backend
 import matplotlib.pyplot as plt
 import seaborn as sns
 from datetime import datetime, timedelta
@@ -293,7 +295,9 @@ def plot_results(results_df, metrics):
     ax4.grid(True, alpha=0.3)
     
     plt.tight_layout()
-    plt.show()
+    plt.savefig('oil_prediction_results.png', dpi=300, bbox_inches='tight')
+    plt.close()  # Close the figure to free memory
+    print("Oil prediction plots saved as 'oil_prediction_results.png'")
     
     # Additional metrics summary
     print(f"\n📊 Additional Model Insights:")
@@ -333,12 +337,13 @@ def predict_future_price(model, df, feature_cols, forecast_horizon=21):
     
     return prediction, prediction_date
 
-def oil_price_prediction_pipeline(df):
+def oil_price_prediction_pipeline(df, verbose=True):
     """
     Complete pipeline for oil price prediction
     """
-    print("🚀 Starting WTI Oil Price Prediction Analysis")
-    print("=" * 60)
+    if verbose:
+        print("🚀 Starting WTI Oil Price Prediction Analysis")
+        print("=" * 60)
     
     # CRITICAL FIX: Handle reverse chronological data
     if 'Date' in df.columns:
@@ -383,21 +388,427 @@ def oil_price_prediction_pipeline(df):
     
     return model, results_df, metrics, future_pred
 
-def run_oil_prediction(df):
+def run_oil_prediction(df, verbose=True):
     """
     Run the complete oil price prediction analysis
     
     Parameters:
-    csv_file_path (str): Path to your CSV file with oil data
+    df: DataFrame with oil data
+    verbose: Whether to print detailed output
     
     Returns:
     tuple: (trained_model, results_dataframe, performance_metrics, future_prediction)
     """
     # Run the pipeline
-    model, results, metrics, prediction = oil_price_prediction_pipeline(df)
+    model, results, metrics, prediction = oil_price_prediction_pipeline(df, verbose)
     
     return model, results, metrics, prediction
 
+def create_stock_features(df_stocks, oil_model, oil_feature_cols):
+    """
+    Create features for stock price prediction using oil data and oil predictions
+    """
+    df = df_stocks.copy()
+    
+    # Calculate average oil service stock price
+    oil_service_stocks = ['SLB', 'HAL']  # Focus on the main 3 oil service companies
+    
+    # Create average stock price
+    stock_cols = [col for col in df.columns if any(ticker in col for ticker in oil_service_stocks)]
+    if len(stock_cols) >= 2:  # Ensure we have at least 3 stocks
+        df['avg_oil_service_stock'] = df[stock_cols].mean(axis=1)
+    else:
+        raise ValueError("Missing required oil service stock data")
+    
+    # Oil price features (current and historical)
+    df['wti_current'] = df['WTI ($/bbl)']
+    df['wti_ma_5'] = df['WTI ($/bbl)'].rolling(5, min_periods=5).mean()
+    df['wti_ma_21'] = df['WTI ($/bbl)'].rolling(21, min_periods=21).mean()
+    df['wti_volatility'] = df['WTI ($/bbl)'].rolling(21, min_periods=21).std()
+    df['wti_momentum'] = df['WTI ($/bbl)'] - df['WTI ($/bbl)'].shift(21)
+    
+    # Oil predictions as features (using the trained oil model)
+    try:
+        df_oil_features = create_features(df)
+        df_oil_clean = df_oil_features.dropna()
+        
+        # Get oil predictions for each date where we have complete features
+        oil_predictions = []
+        for idx in df.index:
+            if idx in df_oil_clean.index:
+                try:
+                    features = df_oil_clean.loc[idx:idx, oil_feature_cols]
+                    if len(features) > 0 and not features.isnull().any().any():
+                        pred = oil_model.predict(features)[0]
+                        oil_predictions.append(pred)
+                    else:
+                        oil_predictions.append(np.nan)
+                except:
+                    oil_predictions.append(np.nan)
+            else:
+                oil_predictions.append(np.nan)
+        
+        df['oil_price_prediction'] = oil_predictions
+        df['oil_prediction_premium'] = df['oil_price_prediction'] - df['wti_current']
+        
+    except Exception as e:
+        print(f"Warning: Could not generate oil predictions as features: {e}")
+        df['oil_price_prediction'] = np.nan
+        df['oil_prediction_premium'] = np.nan
+    
+    # Stock-specific technical indicators
+    df['stock_ma_5'] = df['avg_oil_service_stock'].rolling(5, min_periods=5).mean()
+    df['stock_ma_21'] = df['avg_oil_service_stock'].rolling(21, min_periods=21).mean()
+    df['stock_volatility'] = df['avg_oil_service_stock'].rolling(21, min_periods=21).std()
+    df['stock_momentum'] = df['avg_oil_service_stock'] - df['avg_oil_service_stock'].shift(21)
+    df['stock_rsi'] = calculate_rsi(df['avg_oil_service_stock'], 14)
+    
+    # Oil-stock relationship features
+    df['oil_stock_correlation'] = df['WTI ($/bbl)'].rolling(63).corr(df['avg_oil_service_stock'])
+    df['oil_stock_ratio'] = df['WTI ($/bbl)'] / df['avg_oil_service_stock']
+    df['oil_stock_ratio_ma'] = df['oil_stock_ratio'].rolling(21, min_periods=21).mean()
+    
+    # Lagged features
+    for lag in [1, 5, 21]:
+        df[f'stock_lag_{lag}'] = df['avg_oil_service_stock'].shift(lag)
+        df[f'oil_lag_{lag}'] = df['WTI ($/bbl)'].shift(lag)
+    
+    # Economic indicators (already in the dataframe from oil features)
+    if 'usd_strength' not in df.columns:
+        df['usd_strength'] = (1/df['USD-GBP'] + df['USD-YEN']/100) / 2
+    df['usd_change'] = df['usd_strength'].pct_change(21)
+    
+    # Seasonal patterns
+    df['month'] = pd.to_datetime(df.index).month
+    df['quarter'] = pd.to_datetime(df.index).quarter
+    
+    return df
+
+def prepare_stock_target_variable(df, forecast_horizon=21):
+    """
+    Create target variable: average oil service stock price 21 days ahead
+    """
+    df = df.copy()
+    
+    # Sort by date to ensure proper chronological order
+    df = df.sort_index()
+    
+    print(f"Preparing stock price targets for {len(df)} observations")
+    
+    # For each row, find the stock price 21 business days in the future
+    target_values = []
+    
+    for i, current_date in enumerate(df.index):
+        try:
+            # Find the date 21 business days in the future
+            future_date = current_date + pd.tseries.offsets.BDay(forecast_horizon)
+            
+            # Look for the future stock price
+            if future_date in df.index:
+                target_value = df.loc[future_date, 'avg_oil_service_stock']
+            else:
+                # Find the closest future date
+                future_dates = df.index[df.index > current_date]
+                if len(future_dates) > 0:
+                    closest_future = min(future_dates, key=lambda x: abs((x - future_date).days))
+                    if abs((closest_future - future_date).days) <= 5:  # Within 5 days
+                        target_value = df.loc[closest_future, 'avg_oil_service_stock']
+                    else:
+                        target_value = np.nan
+                else:
+                    target_value = np.nan
+                    
+        except Exception as e:
+            target_value = np.nan
+            
+        target_values.append(target_value)
+    
+    df['target_stock_price'] = target_values
+    
+    # Remove rows where we don't have future data
+    df_clean = df.dropna(subset=['target_stock_price', 'avg_oil_service_stock'])
+    
+    print(f"Stock target variable created: {len(df_clean)} valid predictions")
+    print(f"Removed {len(df) - len(df_clean)} rows without future data")
+    
+    return df_clean
+
+def train_stock_price_model(df_stocks, oil_model, oil_feature_cols, forecast_horizon=21):
+    """
+    Train Random Forest model to predict average oil service stock price
+    """
+    print("\n📈 Training Oil Service Stock Price Prediction Model")
+    print("=" * 60)
+    
+    # Feature engineering
+    df_features = create_stock_features(df_stocks, oil_model, oil_feature_cols)
+    df_with_target = prepare_stock_target_variable(df_features, forecast_horizon)
+    
+    # Select feature columns (exclude target and non-predictive columns)
+    exclude_cols = [
+        'target_stock_price', 'avg_oil_service_stock', 
+        'SLB', 'HAL', 'BKR', 'RIG',  # Individual stock prices
+        'WTI ($/bbl)', 'Brent ($/bbl)'  # Raw oil prices (we use derived features)
+    ]
+    feature_cols = [col for col in df_with_target.columns if col not in exclude_cols and not df_with_target[col].dtype == 'object']
+    
+    # Remove rows with NaN values
+    df_clean = df_with_target.dropna()
+    print(f"Dataset shape after cleaning: {df_clean.shape}")
+    
+    if len(df_clean) < 100:
+        print("⚠️  Warning: Limited data available after feature engineering")
+        return None, None, None, None, None
+    
+    X = df_clean[feature_cols]
+    y = df_clean['target_stock_price']
+    
+    # Use time series split for validation
+    tscv = TimeSeriesSplit(n_splits=3, test_size=126)  # ~6 months test sets
+    
+    # Random Forest model optimized for stock prediction
+    model = RandomForestRegressor(
+        n_estimators=100,
+        max_depth=8,
+        min_samples_split=8,
+        min_samples_leaf=4,
+        max_features=0.4,
+        random_state=42,
+        n_jobs=-1
+    )
+    
+    # Cross-validation
+    cv_scores = cross_val_score(model, X, y, cv=tscv, scoring='neg_mean_absolute_error')
+    print(f"Cross-validation MAE: ${-cv_scores.mean():.2f} ± ${cv_scores.std():.2f}")
+    
+    # Train on full dataset
+    model.fit(X, y)
+    
+    # Feature importance
+    feature_importance = pd.DataFrame({
+        'feature': feature_cols,
+        'importance': model.feature_importances_
+    }).sort_values('importance', ascending=False)
+    
+    print("\n📊 Top 10 Most Important Features:")
+    print(feature_importance.head(10).to_string(index=False))
+    
+    return model, X, y, feature_cols, df_clean
+
+def generate_stock_predictions(stock_model, df_stocks, oil_model, oil_feature_cols, feature_cols, forecast_horizon=21):
+    """
+    Generate stock predictions and calculate performance metrics
+    """
+    df_features = create_stock_features(df_stocks, oil_model, oil_feature_cols)
+    df_with_target = prepare_stock_target_variable(df_features, forecast_horizon)
+    df_clean = df_with_target.dropna()
+    
+    X = df_clean[feature_cols]
+    y_true = df_clean['target_stock_price']
+    
+    # Generate predictions
+    y_pred = stock_model.predict(X)
+    
+    # Calculate metrics
+    mae = mean_absolute_error(y_true, y_pred)
+    rmse = np.sqrt(mean_squared_error(y_true, y_pred))
+    r2 = r2_score(y_true, y_pred)
+    mape = np.mean(np.abs((y_true - y_pred) / y_true)) * 100
+    
+    print(f"\n📈 Stock Model Performance Metrics:")
+    print(f"Mean Absolute Error (MAE): ${mae:.2f}")
+    print(f"Root Mean Square Error (RMSE): ${rmse:.2f}")
+    print(f"R² Score: {r2:.3f}")
+    print(f"Mean Absolute Percentage Error (MAPE): {mape:.2f}%")
+    
+    # Create results dataframe
+    results_df = pd.DataFrame({
+        'date': df_clean.index,
+        'actual': y_true,
+        'predicted': y_pred,
+        'error': y_true - y_pred,
+        'abs_error': np.abs(y_true - y_pred),
+        'actual_oil_price': df_clean['wti_current'],
+        'oil_prediction': df_clean['oil_price_prediction']
+    })
+    
+    return results_df, {'mae': mae, 'rmse': rmse, 'r2': r2, 'mape': mape}
+
+def plot_stock_results(results_df, metrics):
+    """
+    Create comprehensive visualization of stock model results
+    """
+    fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+    fig.suptitle('Oil Service Stock Price Prediction Model Results', fontsize=16, fontweight='bold')
+    
+    # 1. Actual vs Predicted Time Series
+    ax1 = axes[0, 0]
+    ax1.plot(results_df['date'], results_df['actual'], label='Actual', color='blue', alpha=0.7)
+    ax1.plot(results_df['date'], results_df['predicted'], label='Predicted', color='red', alpha=0.7)
+    ax1.set_title('Actual vs Predicted Stock Prices')
+    ax1.set_ylabel('Stock Price ($)')
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+    
+    # 2. Scatter plot: Predicted vs Actual
+    ax2 = axes[0, 1]
+    ax2.scatter(results_df['actual'], results_df['predicted'], alpha=0.6, color='green')
+    min_price = min(results_df['actual'].min(), results_df['predicted'].min())
+    max_price = max(results_df['actual'].max(), results_df['predicted'].max())
+    ax2.plot([min_price, max_price], [min_price, max_price], 'r--', alpha=0.8)
+    ax2.set_xlabel('Actual Stock Price ($)')
+    ax2.set_ylabel('Predicted Stock Price ($)')
+    ax2.set_title(f'Predicted vs Actual (R² = {metrics["r2"]:.3f})')
+    ax2.grid(True, alpha=0.3)
+    
+    # 3. Prediction Errors Over Time
+    ax3 = axes[0, 2]
+    ax3.plot(results_df['date'], results_df['error'], color='purple', alpha=0.7)
+    ax3.axhline(y=0, color='black', linestyle='--', alpha=0.5)
+    ax3.set_title('Prediction Errors Over Time')
+    ax3.set_ylabel('Error ($)')
+    ax3.grid(True, alpha=0.3)
+    
+    # 4. Stock Price vs Oil Price
+    ax4 = axes[1, 0]
+    ax4.scatter(results_df['actual_oil_price'], results_df['actual'], alpha=0.6, color='orange', label='Actual Stock vs Oil')
+    ax4.set_xlabel('Oil Price ($/bbl)')
+    ax4.set_ylabel('Stock Price ($)')
+    ax4.set_title('Stock Price vs Oil Price Relationship')
+    ax4.legend()
+    ax4.grid(True, alpha=0.3)
+    
+    # 5. Oil Predictions vs Stock Performance
+    ax5 = axes[1, 1]
+    valid_oil_pred = results_df.dropna(subset=['oil_prediction'])
+    if len(valid_oil_pred) > 0:
+        ax5.scatter(valid_oil_pred['oil_prediction'], valid_oil_pred['actual'], alpha=0.6, color='brown', label='Stock vs Oil Prediction')
+        ax5.set_xlabel('Oil Price Prediction ($/bbl)')
+        ax5.set_ylabel('Stock Price ($)')
+        ax5.set_title('Stock Price vs Oil Price Predictions')
+        ax5.legend()
+    ax5.grid(True, alpha=0.3)
+    
+    # 6. Error Distribution
+    ax6 = axes[1, 2]
+    ax6.hist(results_df['error'], bins=30, alpha=0.7, color='cyan', edgecolor='black')
+    ax6.axvline(x=0, color='red', linestyle='--', alpha=0.8)
+    ax6.set_title('Distribution of Prediction Errors')
+    ax6.set_xlabel('Error ($)')
+    ax6.set_ylabel('Frequency')
+    ax6.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig('stock_prediction_results.png', dpi=300, bbox_inches='tight')
+    plt.close()  # Close the figure to free memory
+    print("Stock prediction plots saved as 'stock_prediction_results.png'")
+
+def predict_future_stock_price(stock_model, df_stocks, oil_model, oil_feature_cols, stock_feature_cols, forecast_horizon=21):
+    """
+    Make a prediction for the average oil service stock price 21 days out
+    """
+    df_features = create_stock_features(df_stocks, oil_model, oil_feature_cols)
+    
+    # Get the most recent complete feature set
+    latest_features = df_features[stock_feature_cols].dropna().iloc[-1:]
+    
+    if len(latest_features) == 0:
+        print("⚠️  Cannot make stock prediction - insufficient recent data")
+        return None
+    
+    prediction = stock_model.predict(latest_features)[0]
+    
+    # Calculate prediction date
+    last_date = df_stocks.index[-1]
+    if isinstance(last_date, str):
+        last_date = pd.to_datetime(last_date)
+    
+    prediction_date = last_date + pd.Timedelta(days=forecast_horizon)
+    
+    # Get current info
+    current_avg_stock = df_features['avg_oil_service_stock'].iloc[-1]
+    current_oil_price = df_features['wti_current'].iloc[-1]
+    
+    print(f"\n🔮 Stock Future Prediction:")
+    print(f"Current average oil service stock price: ${current_avg_stock:.2f}")
+    print(f"Current oil price: ${current_oil_price:.2f}")
+    print(f"Predicted average stock price for ~{prediction_date.strftime('%Y-%m-%d')}: ${prediction:.2f}")
+    print(f"Expected change: ${prediction - current_avg_stock:.2f} ({((prediction - current_avg_stock) / current_avg_stock * 100):.1f}%)")
+    
+    return prediction, prediction_date
+
+def run_stock_prediction(df_stocks, oil_model, oil_feature_cols):
+    """
+    Complete pipeline for oil service stock price prediction
+    """
+    print("\n🚀 Starting Oil Service Stock Price Prediction Analysis")
+    print("=" * 70)
+    
+    # Handle index
+    if 'Date' in df_stocks.columns:
+        df_stocks = df_stocks.set_index('Date')
+    df_stocks.index = pd.to_datetime(df_stocks.index)
+    
+    # Check if data is in reverse chronological order and fix it
+    if df_stocks.index[0] > df_stocks.index[-1]:
+        print("⚠️  Stock data is in reverse chronological order - fixing...")
+        df_stocks = df_stocks.iloc[::-1]
+        print("✅ Stock data order corrected")
+    
+    print(f"Stock data range: {df_stocks.index.min().strftime('%Y-%m-%d')} to {df_stocks.index.max().strftime('%Y-%m-%d')}")
+    print(f"Total observations: {len(df_stocks)}")
+    
+    # Train stock model
+    stock_model, X, y, feature_cols, df_clean = train_stock_price_model(df_stocks, oil_model, oil_feature_cols)
+    
+    if stock_model is None:
+        print("Stock model training failed")
+        return None, None, None, None
+    
+    # Generate predictions and evaluate
+    results_df, metrics = generate_stock_predictions(stock_model, df_stocks, oil_model, oil_feature_cols, feature_cols)
+    
+    # Plot results
+    plot_stock_results(results_df, metrics)
+    
+    # Make future prediction
+    future_pred, pred_date = predict_future_stock_price(stock_model, df_stocks, oil_model, oil_feature_cols, feature_cols)
+    
+    return stock_model, results_df, metrics, future_pred
+
 if __name__ == "__main__":
-    df = data.get_data_from_csv()
-    model, results, metrics, prediction = run_oil_prediction(df)
+    df_raw = data.get_data_from_csv()
+    
+    # First run oil price prediction
+    print("\n📊 PHASE 1: Oil Price Prediction")
+    print("-" * 50)
+    oil_model, oil_results, oil_metrics, oil_prediction = run_oil_prediction(df_raw, verbose=True)
+
+    # Get stock data (this will process df_raw internally)
+    print("\n📈 PHASE 2: Stock Data Integration")  
+    print("-" * 50)
+    df_stocks = data.add_stocks_to_df(df_raw)
+    print(f"✅ Stock data integrated. Shape: {df_stocks.shape}")
+    
+    # Extract feature columns from oil model training (avoid reprocessing)
+    df_temp = df_raw.copy()
+    if 'Date' in df_temp.columns:
+        df_temp = df_temp.set_index('Date')
+    df_temp.index = pd.to_datetime(df_temp.index)
+    
+    df_oil_features = create_features(df_temp)
+    df_oil_with_target = prepare_target_variable(df_oil_features, 21)
+    exclude_cols = [
+        'WTI ($/bbl)', 'target_monthly_avg', 'monthly_avg_current', 'year_month',
+        'future_date', 'future_year_month', 'Brent ($/bbl)'
+    ]
+    oil_feature_cols = [col for col in df_oil_with_target.columns if col not in exclude_cols]
+    print(f"✅ Oil feature columns extracted: {len(oil_feature_cols)} features")
+    
+    # Run stock prediction using oil model and data
+    print(f"\n📈 PHASE 3: Stock Price Prediction")
+    print("-" * 50)
+    
+    stock_model, stock_results, stock_metrics, stock_prediction = run_stock_prediction(
+        df_stocks, oil_model, oil_feature_cols
+    )
