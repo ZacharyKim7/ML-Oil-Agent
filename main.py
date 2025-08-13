@@ -533,107 +533,6 @@ def prepare_stock_target_variable(df, forecast_horizon=21):
     
     return df_clean
 
-def train_stock_price_model(df_stocks, oil_model, oil_feature_cols, forecast_horizon=21):
-    """
-    Train Random Forest model to predict average oil service stock price
-    """
-    print("\n📈 Training Oil Service Stock Price Prediction Model")
-    print("=" * 60)
-    
-    # Feature engineering
-    df_features = create_stock_features(df_stocks, oil_model, oil_feature_cols)
-    df_with_target = prepare_stock_target_variable(df_features, forecast_horizon)
-    
-    # Select feature columns (exclude target and non-predictive columns)
-    exclude_cols = [
-        'target_stock_price', 'avg_oil_service_stock', 
-        'SLB', 'HAL', 'BKR', 'RIG',  # Individual stock prices
-        'WTI ($/bbl)', 'Brent ($/bbl)'  # Raw oil prices (we use derived features)
-    ]
-    feature_cols = [col for col in df_with_target.columns if col not in exclude_cols and not df_with_target[col].dtype == 'object']
-    
-    # Remove rows with NaN values
-    df_clean = df_with_target.dropna()
-    print(f"Dataset shape after cleaning: {df_clean.shape}")
-    
-    if len(df_clean) < 100:
-        print("⚠️  Warning: Limited data available after feature engineering")
-        return None, None, None, None, None
-    
-    X = df_clean[feature_cols]
-    y = df_clean['target_stock_price']
-    
-    # Use time series split for validation
-    tscv = TimeSeriesSplit(n_splits=3, test_size=126)  # ~6 months test sets
-    
-    # Random Forest model optimized for stock prediction
-    model = RandomForestRegressor(
-        n_estimators=100,
-        max_depth=8,
-        min_samples_split=8,
-        min_samples_leaf=4,
-        max_features=0.4,
-        random_state=42,
-        n_jobs=-1
-    )
-    
-    # Cross-validation
-    cv_scores = cross_val_score(model, X, y, cv=tscv, scoring='neg_mean_absolute_error')
-    print(f"Cross-validation MAE: ${-cv_scores.mean():.2f} ± ${cv_scores.std():.2f}")
-    
-    # Train on full dataset
-    model.fit(X, y)
-    
-    # Feature importance
-    feature_importance = pd.DataFrame({
-        'feature': feature_cols,
-        'importance': model.feature_importances_
-    }).sort_values('importance', ascending=False)
-    
-    print("\n📊 Top 10 Most Important Features:")
-    print(feature_importance.head(10).to_string(index=False))
-    
-    return model, X, y, feature_cols, df_clean
-
-def generate_stock_predictions(stock_model, df_stocks, oil_model, oil_feature_cols, feature_cols, forecast_horizon=21):
-    """
-    Generate stock predictions and calculate performance metrics
-    """
-    df_features = create_stock_features(df_stocks, oil_model, oil_feature_cols)
-    df_with_target = prepare_stock_target_variable(df_features, forecast_horizon)
-    df_clean = df_with_target.dropna()
-    
-    X = df_clean[feature_cols]
-    y_true = df_clean['target_stock_price']
-    
-    # Generate predictions
-    y_pred = stock_model.predict(X)
-    
-    # Calculate metrics
-    mae = mean_absolute_error(y_true, y_pred)
-    rmse = np.sqrt(mean_squared_error(y_true, y_pred))
-    r2 = r2_score(y_true, y_pred)
-    mape = np.mean(np.abs((y_true - y_pred) / y_true)) * 100
-    
-    print(f"\n📈 Stock Model Performance Metrics:")
-    print(f"Mean Absolute Error (MAE): ${mae:.2f}")
-    print(f"Root Mean Square Error (RMSE): ${rmse:.2f}")
-    print(f"R² Score: {r2:.3f}")
-    print(f"Mean Absolute Percentage Error (MAPE): {mape:.2f}%")
-    
-    # Create results dataframe
-    results_df = pd.DataFrame({
-        'date': df_clean.index,
-        'actual': y_true,
-        'predicted': y_pred,
-        'error': y_true - y_pred,
-        'abs_error': np.abs(y_true - y_pred),
-        'actual_oil_price': df_clean['wti_current'],
-        'oil_prediction': df_clean['oil_price_prediction']
-    })
-    
-    return results_df, {'mae': mae, 'rmse': rmse, 'r2': r2, 'mape': mape}
-
 def plot_stock_results(results_df, metrics):
     """
     Create comprehensive visualization of stock model results
@@ -703,79 +602,141 @@ def plot_stock_results(results_df, metrics):
     plt.close()  # Close the figure to free memory
     print("Stock prediction plots saved as 'stock_prediction_results.png'")
 
-def predict_future_stock_price(stock_model, df_stocks, oil_model, oil_feature_cols, stock_feature_cols, forecast_horizon=21):
+def build_stock_dataset(df_stocks, oil_model, oil_feature_cols, horizon=21, verbose=False):
+    """Build the complete stock dataset with features and targets"""
+    df_feat = create_stock_features(df_stocks, oil_model, oil_feature_cols)
+    df_tgt  = prepare_stock_target_variable(df_feat, horizon)
+    df_clean = df_tgt.dropna()
+
+    # keep just once each column (in case of dupes)
+    df_clean = df_clean.loc[:, ~df_clean.columns.duplicated()]
+
+    exclude = [
+        'target_stock_price','avg_oil_service_stock',
+        'SLB','HAL','BKR','RIG','WTI ($/bbl)','Brent ($/bbl)'
+    ]
+    feature_cols = [c for c in df_clean.columns
+                    if c not in exclude and df_clean[c].dtype != 'object']
+
+    X = df_clean[feature_cols]
+    y = df_clean['target_stock_price']
+    return df_clean, X, y, feature_cols
+
+def train_stock_model_on_dataset(X, y, n_splits=3):
+    """Train the stock model on prepared dataset"""
+    tscv = TimeSeriesSplit(n_splits=n_splits, test_size=126)
+    model = RandomForestRegressor(
+        n_estimators=100, max_depth=8,
+        min_samples_split=8, min_samples_leaf=4,
+        max_features=0.4, random_state=42, n_jobs=-1
+    )
+    cv_scores = cross_val_score(model, X, y, cv=tscv, scoring='neg_mean_absolute_error')
+    print(f"Cross-validation MAE: ${-cv_scores.mean():.2f} ± ${cv_scores.std():.2f}")
+    model.fit(X, y)
+    return model
+
+def evaluate_stock_model(model, df_clean, feature_cols):
+    """Evaluate the trained stock model"""
+    X = df_clean[feature_cols]
+    y_true = df_clean['target_stock_price'].values
+    y_pred = model.predict(X)
+
+    mae  = mean_absolute_error(y_true, y_pred)
+    rmse = np.sqrt(mean_squared_error(y_true, y_pred))
+    r2   = r2_score(y_true, y_pred)
+    mape = np.mean(np.abs((y_true - y_pred) / y_true)) * 100
+
+    print("\n📈 Stock Model Performance Metrics:")
+    print(f"MAE ${mae:.2f} | RMSE ${rmse:.2f} | R² {r2:.3f} | MAPE {mape:.2f}%")
+
+    results_df = pd.DataFrame({
+        'date': df_clean.index,
+        'actual': y_true,
+        'predicted': y_pred,
+        'error': y_true - y_pred,
+        'abs_error': np.abs(y_true - y_pred),
+        'actual_oil_price': df_clean['wti_current'],
+        'oil_prediction': df_clean['oil_price_prediction']
+    })
+    # add these if they exist in df_clean
+    for col in ['wti_current', 'oil_price_prediction']:
+        if col in df_clean.columns:
+            results_df[col if col != 'wti_current' else 'actual_oil_price'] = df_clean[col].values
+    return results_df, {'mae': mae, 'rmse': rmse, 'r2': r2, 'mape': mape}
+
+def predict_future_stock_price(model, df_features_complete, feature_cols, horizon=21):
     """
-    Make a prediction for the average oil service stock price 21 days out
+    Make future prediction using already-computed features
+    This eliminates the need to recompute features
     """
-    df_features = create_stock_features(df_stocks, oil_model, oil_feature_cols)
-    
     # Get the most recent complete feature set
-    latest_features = df_features[stock_feature_cols].dropna().iloc[-1:]
+    latest = df_features_complete[feature_cols].dropna().iloc[-1:]
     
-    if len(latest_features) == 0:
+    if latest.empty:
         print("⚠️  Cannot make stock prediction - insufficient recent data")
-        return None
+        return None, None
     
-    prediction = stock_model.predict(latest_features)[0]
+    pred = model.predict(latest)[0]
     
     # Calculate prediction date
-    last_date = df_stocks.index[-1]
-    if isinstance(last_date, str):
-        last_date = pd.to_datetime(last_date)
+    last_date = pd.to_datetime(df_features_complete.index[-1])
+    pred_date = last_date + pd.tseries.offsets.BDay(horizon)
     
-    prediction_date = last_date + pd.Timedelta(days=forecast_horizon)
+    print(f"\n🔮 Future Stock Prediction:")
+    current_stock_price = df_features_complete['avg_oil_service_stock'].iloc[-1]
+    print(f"Current avg oil service stock price: ${current_stock_price:.2f}")
+    print(f"Predicted stock price in {horizon} business days: ${pred:.2f}")
+    print(f"Prediction date: ~{pred_date.strftime('%Y-%m-%d')}")
     
-    # Get current info
-    current_avg_stock = df_features['avg_oil_service_stock'].iloc[-1]
-    current_oil_price = df_features['wti_current'].iloc[-1]
-    
-    print(f"\n🔮 Stock Future Prediction:")
-    print(f"Current average oil service stock price: ${current_avg_stock:.2f}")
-    print(f"Current oil price: ${current_oil_price:.2f}")
-    print(f"Predicted average stock price for ~{prediction_date.strftime('%Y-%m-%d')}: ${prediction:.2f}")
-    print(f"Expected change: ${prediction - current_avg_stock:.2f} ({((prediction - current_avg_stock) / current_avg_stock * 100):.1f}%)")
-    
-    return prediction, prediction_date
+    return pred, pred_date
 
 def run_stock_prediction(df_stocks, oil_model, oil_feature_cols):
     """
-    Complete pipeline for oil service stock price prediction
+    Main function for stock prediction - now with single feature computation
     """
     print("\n🚀 Starting Oil Service Stock Price Prediction Analysis")
     print("=" * 70)
-    
-    # Handle index
+
     if 'Date' in df_stocks.columns:
         df_stocks = df_stocks.set_index('Date')
     df_stocks.index = pd.to_datetime(df_stocks.index)
-    
-    # Check if data is in reverse chronological order and fix it
     if df_stocks.index[0] > df_stocks.index[-1]:
         print("⚠️  Stock data is in reverse chronological order - fixing...")
         df_stocks = df_stocks.iloc[::-1]
         print("✅ Stock data order corrected")
-    
-    print(f"Stock data range: {df_stocks.index.min().strftime('%Y-%m-%d')} to {df_stocks.index.max().strftime('%Y-%m-%d')}")
+
+    print(f"Stock data range: {df_stocks.index.min():%Y-%m-%d} to {df_stocks.index.max():%Y-%m-%d}")
     print(f"Total observations: {len(df_stocks)}")
-    
-    # Train stock model
-    stock_model, X, y, feature_cols, df_clean = train_stock_price_model(df_stocks, oil_model, oil_feature_cols)
-    
-    if stock_model is None:
-        print("Stock model training failed")
-        return None, None, None, None
-    
-    # Generate predictions and evaluate
-    results_df, metrics = generate_stock_predictions(stock_model, df_stocks, oil_model, oil_feature_cols, feature_cols)
-    
+
+    # 🎯 SINGLE FEATURE COMPUTATION - Build dataset once, reuse everywhere
+    print("Building stock features and dataset...")
+    df_clean, X, y, feature_cols = build_stock_dataset(df_stocks, oil_model, oil_feature_cols)
+    print(f"✅ Features built. Dataset shape: {df_clean.shape}, Features: {len(feature_cols)}")
+
+    # Train model
+    print("Training stock prediction model...")
+    model = train_stock_model_on_dataset(X, y)
+
+    # Evaluate model
+    print("Evaluating model performance...")
+    results_df, metrics = evaluate_stock_model(model, df_clean, feature_cols)
+
     # Plot results
     plot_stock_results(results_df, metrics)
-    
-    # Make future prediction
-    future_pred, pred_date = predict_future_stock_price(stock_model, df_stocks, oil_model, oil_feature_cols, feature_cols)
-    
-    return stock_model, results_df, metrics, future_pred
 
+    # Make future prediction using the SAME feature dataset
+    print("Generating future prediction...")
+    future_pred, pred_date = predict_future_stock_price(
+        model, df_clean, feature_cols
+    )
+
+    print(f"\n💡 Stock Model Insights:")
+    print("The model uses oil price data, oil predictions, technical indicators,")
+    print("and economic factors to predict the average price of oil service stocks.")
+    print(f"Model trained on {len(df_clean)} observations with {len(feature_cols)} features.")
+
+    return model, results_df, metrics, future_pred
+    
 if __name__ == "__main__":
     df_raw = data.get_data_from_csv()
     
