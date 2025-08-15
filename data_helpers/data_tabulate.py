@@ -785,7 +785,7 @@ def add_world_population(df, live_read=False, lag_days=365):
     return df.merge(daily_df, how="left", left_index=True, right_index=True)
 
 # Controls whether API data is stored as JSON and read, or pulled and processed directly in memory
-handle_in_memory = False
+handle_in_memory = True
 def get_combined_oil_df(save=True):
     master = (
         tabulate_WTI_price(handle_in_memory)
@@ -797,7 +797,7 @@ def get_combined_oil_df(save=True):
         .pipe(add_India_Consumption_to_df, live_read=handle_in_memory, lag_days=365)
         .pipe(add_OECD_stocks_to_df, live_read=handle_in_memory, lag_days=30)
         .pipe(add_USA_stocks_to_df, live_read=handle_in_memory, lag_days=30)
-        .pipe(add_USA_net_imports, live_read=True, lag_days=30)
+        .pipe(add_USA_net_imports, live_read=handle_in_memory, lag_days=30)
         .pipe(add_USA_rig_count, live_read=handle_in_memory, lag_days=30)
         .pipe(add_CPI_to_df, live_read=handle_in_memory, lag_days=30)
         .pipe(add_GDP_growth_to_df, live_read=handle_in_memory, lag_quarters=1)
@@ -809,6 +809,24 @@ def get_combined_oil_df(save=True):
         # .pipe(add_USA_from_OPEC, live_read=handle_in_memory, lag_days=30)
         # .pipe(add_USA_from_NOPEC, live_read=handle_in_memory, lag_days=30)
     )
+
+    master["WTI ($/bbl)"] = master["WTI ($/bbl)"].ffill()
+    master["Brent ($/bbl)"] = master["Brent ($/bbl)"].ffill()
+    master["OPEC P (tbbl/d)"] = master["OPEC P (tbbl/d)"].ffill()
+    master["NOPEC P (tbbl/d)"] = master["NOPEC P (tbbl/d)"].ffill()
+    master["OECD C (tbbl/d)"] = master["OECD C (tbbl/d)"].ffill()
+    master["China C (tbbl/d)"] = master["China C (tbbl/d)"].ffill()
+    master["India C (tbbl/d)"] = master["India C (tbbl/d)"].ffill()
+    master["OECD S (mbbl)"] = master["OECD S (mbbl)"].ffill()
+    master["USA S (mbbl)"] = master["USA S (mbbl)"].ffill()
+    master["US net imports (tbbl/d)"] = master["US net imports (tbbl/d)"].ffill()
+    master["USA rigs (m)"] = master["USA rigs (m)"].ffill()
+    master["CPI"] = master["CPI"].ffill()
+    master["GDP (yoy%)"] = master["GDP (yoy%)"].ffill()
+    master["Population"] = master["Population"].ffill()
+    master["USD-GBP"] = master["USD-GBP"].ffill()
+    master["USD-YEN"] = master["USD-YEN"].ffill()
+    master["USD-GBP"] = master["USD-GBP"].ffill()
 
     if save:
         # Save the DataFrame to data/combined_oil_df.csv, overwriting if it exists
@@ -824,7 +842,27 @@ Function to get data stored in the combined_oil_df.csv rather than from the API.
 For use in development and testing.
 """
 def get_data_from_csv():
-    return pd.read_csv(os.path.join(os.path.dirname(os.path.dirname(__file__)), "data/combined_oil_df.csv"))
+    master = pd.read_csv(os.path.join(os.path.dirname(os.path.dirname(__file__)), "data/combined_oil_df.csv"))
+
+    master["WTI ($/bbl)"] = master["WTI ($/bbl)"].ffill()
+    master["Brent ($/bbl)"] = master["Brent ($/bbl)"].ffill()
+    master["OPEC P (tbbl/d)"] = master["OPEC P (tbbl/d)"].ffill()
+    master["NOPEC P (tbbl/d)"] = master["NOPEC P (tbbl/d)"].ffill()
+    master["OECD C (tbbl/d)"] = master["OECD C (tbbl/d)"].ffill()
+    master["China C (tbbl/d)"] = master["China C (tbbl/d)"].ffill()
+    master["India C (tbbl/d)"] = master["India C (tbbl/d)"].ffill()
+    master["OECD S (mbbl)"] = master["OECD S (mbbl)"].ffill()
+    master["USA S (mbbl)"] = master["USA S (mbbl)"].ffill()
+    master["US net imports (tbbl/d)"] = master["US net imports (tbbl/d)"].ffill()
+    master["USA rigs (m)"] = master["USA rigs (m)"].ffill()
+    master["CPI"] = master["CPI"].ffill()
+    master["GDP (yoy%)"] = master["GDP (yoy%)"].ffill()
+    master["Population"] = master["Population"].ffill()
+    master["USD-GBP"] = master["USD-GBP"].ffill()
+    master["USD-YEN"] = master["USD-YEN"].ffill()
+    master["USD-GBP"] = master["USD-GBP"].ffill()
+
+    return master
 
 """
 Gets Yahoo stock data and appends it to a master data frame
