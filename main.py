@@ -359,13 +359,6 @@ def oil_price_prediction_pipeline(df, verbose=True):
     print(f"Data range: {df.index.min().strftime('%Y-%m-%d')} to {df.index.max().strftime('%Y-%m-%d')}")
     print(f"Total observations: {len(df)}")
     
-    # Anti-leakage validation
-    print("\n🔍 Data Leakage Prevention Checks:")
-    print("- ✅ Data sorted chronologically")
-    print("- ✅ All features use only past/current information")
-    print("- ✅ Target variable calculated from future data only")
-    print("- ✅ Time series cross-validation prevents temporal leakage")
-    
     # Train model
     model, X, y, feature_cols, df_clean = train_oil_price_model(df)
     
@@ -377,14 +370,6 @@ def oil_price_prediction_pipeline(df, verbose=True):
     
     # Make future prediction
     future_pred, pred_date = predict_future_price(model, df, feature_cols)
-    
-    # Model interpretation
-    print(f"\nModel Insights:")
-    print(f"The model uses {len(feature_cols)} features including technical indicators,")
-    print(f"supply/demand fundamentals, economic factors, and seasonal patterns.")
-    print(f"Random Forest was chosen for its ability to capture non-linear relationships")
-    print(f"and interactions between oil market factors without overfitting.")
-    
     
     return model, results_df, metrics, future_pred
 
@@ -729,11 +714,6 @@ def run_stock_prediction(df_stocks, oil_model, oil_feature_cols):
     future_pred, pred_date = predict_future_stock_price(
         model, df_clean, feature_cols
     )
-
-    print(f"\n💡 Stock Model Insights:")
-    print("The model uses oil price data, oil predictions, technical indicators,")
-    print("and economic factors to predict the average price of oil service stocks.")
-    print(f"Model trained on {len(df_clean)} observations with {len(feature_cols)} features.")
 
     return model, results_df, metrics, future_pred
     
