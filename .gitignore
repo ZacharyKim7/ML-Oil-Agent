@@ -3,3 +3,6 @@ venv/
 data/
 __pycache__/
 *.png
+main2.py
+main3.py
+test*

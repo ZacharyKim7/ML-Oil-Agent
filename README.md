@@ -49,4 +49,14 @@ ML-Oil-Agent$ python -m main
 
 * US Rig Counts (Monthly)
 
-# Key Features
+# Files
+
+* main_archive contains old RF and quantile regression
+
+* Main2 has another quantile regression
+
+# Main3 has OOS random forest
+
+# test.py has claude predictions with bad results
+
+# 
