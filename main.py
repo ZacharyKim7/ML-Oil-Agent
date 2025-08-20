@@ -560,24 +560,28 @@ def plot_stock_results(results_df, metrics):
     print("Stock prediction plots saved as 'stock_prediction_results.png'")
 
 def build_stock_dataset(df_stocks, oil_model, oil_feature_cols, df_oil_features, horizon=21, verbose=False):
-    """Build the complete stock dataset with features and targets"""
-    df_feat = create_stock_features(df_stocks, oil_model, oil_feature_cols, df_oil_features)
-    df_tgt  = prepare_stock_target_variable(df_feat, horizon)
-    df_clean = df_tgt.dropna()
+    # All features for all dates
+    df_feat_all = create_stock_features(df_stocks, oil_model, oil_feature_cols, df_oil_features)
+    
+    # Add target (this will inherently drop last `horizon` when you filter later)
+    df_tgt = prepare_stock_target_variable(df_feat_all, horizon)
 
-    # keep just once each column (in case of dupes)
-    df_clean = df_clean.loc[:, ~df_clean.columns.duplicated()]
+    # Labeled training set: drop only rows without target (and essential current)
+    df_labeled = df_tgt.dropna(subset=['avg_oil_service_stock', 'target_stock_price'])
+
+    # (optional) if you still want to remove dup columns
+    df_labeled = df_labeled.loc[:, ~df_labeled.columns.duplicated()]
 
     exclude = [
         'target_stock_price','avg_oil_service_stock',
         'SLB','HAL','BKR','RIG','WTI ($/bbl)','Brent ($/bbl)'
     ]
-    feature_cols = [c for c in df_clean.columns
-                    if c not in exclude and df_clean[c].dtype != 'object']
+    feature_cols = [c for c in df_labeled.columns
+                    if c not in exclude and df_labeled[c].dtype != 'object']
 
-    X = df_clean[feature_cols]
-    y = df_clean['target_stock_price']
-    return df_clean, X, y, feature_cols
+    X = df_labeled[feature_cols]
+    y = df_labeled['target_stock_price']
+    return df_feat_all, df_labeled, X, y, feature_cols
 
 def train_stock_model_on_dataset(X, y, n_splits=3):
     """Train the stock model on prepared dataset"""
@@ -621,30 +625,24 @@ def evaluate_stock_model(model, df_clean, feature_cols):
             results_df[col if col != 'wti_current' else 'actual_oil_price'] = df_clean[col].values
     return results_df, {'mae': mae, 'rmse': rmse, 'r2': r2, 'mape': mape}
 
-def predict_future_stock_price(model, df_features_complete, feature_cols, horizon=21):
-    """
-    Make future prediction using already-computed features
-    This eliminates the need to recompute features
-    """
-    # Get the most recent complete feature set
-    latest = df_features_complete[feature_cols].dropna().iloc[-1:]
-    
-    if latest.empty:
+def predict_future_stock_price(model, df_features_all, feature_cols, horizon=21):
+    # use the most recent *complete* feature row from ALL features
+    latest_row = df_features_all[feature_cols].dropna().iloc[-1:]
+    if latest_row.empty:
         print("⚠️  Cannot make stock prediction - insufficient recent data")
         return None, None
-    
-    pred = model.predict(latest)[0]
-    
-    # Calculate prediction date
-    last_date = pd.to_datetime(df_features_complete.index[-1])
+
+    pred = model.predict(latest_row)[0]
+
+    last_date = pd.to_datetime(df_features_all.index[-1])
     pred_date = last_date + pd.tseries.offsets.BDay(horizon)
-    
+
     print(f"\n🔮 Future Stock Prediction:")
-    current_stock_price = df_features_complete['avg_oil_service_stock'].iloc[-1]
-    print(f"Current avg oil service stock price: ${current_stock_price:.2f}")
-    print(f"Predicted stock price in {horizon} business days: ${pred:.2f}")
-    print(f"Prediction date: ~{pred_date.strftime('%Y-%m-%d')}")
-    
+    if 'avg_oil_service_stock' in df_features_all.columns:
+        current_stock_price = df_features_all['avg_oil_service_stock'].dropna().iloc[-1]
+        print(f"Current avg oil service stock price: ${current_stock_price:.2f}")
+    print(f"Predicted stock price in {horizon} trading days: ${pred:.2f}")
+    print(f"Prediction date: ~{pred_date:%Y-%m-%d}")
     return pred, pred_date
 
 def run_stock_prediction(df_stocks, oil_model, oil_feature_cols, df_oil_features):
@@ -668,7 +666,7 @@ def run_stock_prediction(df_stocks, oil_model, oil_feature_cols, df_oil_features
 
     # 🎯 SINGLE FEATURE COMPUTATION - Build dataset once, reuse everywhere
     print("Building stock features and dataset...")
-    df_clean, X, y, feature_cols = build_stock_dataset(df_stocks, oil_model, oil_feature_cols, df_oil_features)
+    df_feat_all, df_clean, X, y, feature_cols = build_stock_dataset(df_stocks, oil_model, oil_feature_cols, df_oil_features)
     print(f"✅ Features built. Dataset shape: {df_clean.shape}, Features: {len(feature_cols)}")
     
     # Debug: Show the date range for predictions
@@ -689,7 +687,7 @@ def run_stock_prediction(df_stocks, oil_model, oil_feature_cols, df_oil_features
     # Make future prediction using the SAME feature dataset
     print("Generating future prediction...")
     future_pred, pred_date = predict_future_stock_price(
-        model, df_clean, feature_cols
+        model, df_feat_all, feature_cols
     )
 
     return model, results_df, metrics, future_pred
