@@ -475,51 +475,19 @@ def create_stock_features(df_stocks, oil_model, oil_feature_cols, df_oil_feature
 
 def prepare_stock_target_variable(df, forecast_horizon=21):
     """
-    Create target variable: average oil service stock price 21 days ahead
+    Target = avg_oil_service_stock exactly `forecast_horizon` TRADING days ahead,
+    where the index is already trading-day-only (Yahoo).
     """
-    df = df.copy()
-    
-    # Sort by date to ensure proper chronological order
-    df = df.sort_index()
-    
-    print(f"Preparing stock price targets for {len(df)} observations")
-    
-    # For each row, find the stock price 21 business days in the future
-    target_values = []
-    
-    for i, current_date in enumerate(df.index):
-        try:
-            # Find the date 21 business days in the future
-            future_date = current_date + pd.tseries.offsets.BDay(forecast_horizon)
-            
-            # Look for the future stock price
-            if future_date in df.index:
-                target_value = df.loc[future_date, 'avg_oil_service_stock']
-            else:
-                # Find the closest future date
-                future_dates = df.index[df.index > current_date]
-                if len(future_dates) > 0:
-                    closest_future = min(future_dates, key=lambda x: abs((x - future_date).days))
-                    if abs((closest_future - future_date).days) <= 5:  # Within 5 days
-                        target_value = df.loc[closest_future, 'avg_oil_service_stock']
-                    else:
-                        target_value = np.nan
-                else:
-                    target_value = np.nan
-                    
-        except Exception as e:
-            target_value = np.nan
-            
-        target_values.append(target_value)
-    
-    df['target_stock_price'] = target_values
-    
-    # Remove rows where we don't have future data
-    df_clean = df.dropna(subset=['target_stock_price', 'avg_oil_service_stock'])
-    
+    df = df.sort_index().copy()
+
+    # Strict "next 21 trading days" via positional shift
+    df['target_stock_price'] = df['avg_oil_service_stock'].shift(-forecast_horizon)
+
+    # Drop only rows where we truly can't form the target/current
+    df_clean = df.dropna(subset=['avg_oil_service_stock', 'target_stock_price'])
+
     print(f"Stock target variable created: {len(df_clean)} valid predictions")
     print(f"Removed {len(df) - len(df_clean)} rows without future data")
-    
     return df_clean
 
 def plot_stock_results(results_df, metrics):

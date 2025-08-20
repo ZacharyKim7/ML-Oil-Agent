@@ -38,23 +38,6 @@ def get_stock_prices(stocks="SLB HAL BKR WFRD RIG FTI",
     # Slice just the Close price across tickers
     close_df = df.xs("Close", axis=1, level=1)
 
-    # df_clean = close_df.copy()
-    
-    # # Ensure the index is datetime
-    # if not isinstance(df_clean.index, pd.DatetimeIndex):
-    #     df_clean.index = pd.to_datetime(df_clean.index)
-    
-    # # Ensure the index is named 'Date'
-    # df_clean.index.name = 'Date'
-    
-    # # Convert all columns to numeric, handling any non-numeric values
-    # for col in df_clean.columns:
-    #     df_clean[col] = pd.to_numeric(df_clean[col], errors='coerce')
-    
-    # Clean up names so the display matches your "clean" CSV (no extra 'Ticker' header line)
-    # close_df.index.name = "Date"
-    # close_df.columns.name = None
-
     if save:
         clean_path = os.path.join(data_folder, "clean_stock_prices.csv")
         close_df.to_csv(clean_path)
