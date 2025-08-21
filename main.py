@@ -14,6 +14,8 @@ from data_helpers import data_tabulate as data
 
 warnings.filterwarnings('ignore')
 
+TICKERS = ['SLB', 'HAL']
+
 def create_features(df):
     """
     Create comprehensive features for oil price prediction including:
@@ -394,256 +396,263 @@ def run_oil_prediction(df, verbose=True):
     
     return model, results, metrics, prediction
 
-def create_stock_features(df_stocks, oil_model, oil_feature_cols, df_oil_features):
-    """
-    Create features for stock price prediction using oil data and oil predictions
-    """
+def create_stock_features(df_stocks, oil_model, oil_feature_cols, df_oil_features, tickers=TICKERS):
     df = df_stocks.copy()
-    
-    # Calculate average oil service stock price
-    oil_service_stocks = ['SLB', 'HAL']
-    
-    # Create average stock price
-    stock_cols = [col for col in df.columns if any(ticker in col for ticker in oil_service_stocks)]
-    if len(stock_cols) >= 2:  # Ensure we have at least 3 stocks
-        df['avg_oil_service_stock'] = df[stock_cols].mean(axis=1)
-    else:
-        raise ValueError("Missing required oil service stock data")
-    
-    # Oil price features (current and historical)
+
+    # --- Oil & macro features (shared) ---
     df['wti_current'] = df['WTI ($/bbl)']
-    df['wti_ma_5'] = df['WTI ($/bbl)'].rolling(5, min_periods=5).mean()
+    df['wti_ma_5']  = df['WTI ($/bbl)'].rolling(5,  min_periods=5).mean()
     df['wti_ma_21'] = df['WTI ($/bbl)'].rolling(21, min_periods=21).mean()
     df['wti_volatility'] = df['WTI ($/bbl)'].rolling(21, min_periods=21).std()
-    df['wti_momentum'] = df['WTI ($/bbl)'] - df['WTI ($/bbl)'].shift(21)
-    
-    # Oil predictions as features (using the trained oil model)
+    df['wti_momentum']   = df['WTI ($/bbl)'] - df['WTI ($/bbl)'].shift(21)
+
+    # Oil model prediction as a feature
     try:
         df_oil_clean = df_oil_features.dropna()
-        
-        # Get oil predictions for each date where we have complete features
-        oil_predictions = []
+        preds = []
         for idx in df.index:
             if idx in df_oil_clean.index:
-                try:
-                    features = df_oil_clean.loc[idx:idx, oil_feature_cols]
-                    if len(features) > 0 and not features.isnull().any().any():
-                        pred = oil_model.predict(features)[0]
-                        oil_predictions.append(pred)
-                    else:
-                        oil_predictions.append(np.nan)
-                except:
-                    oil_predictions.append(np.nan)
+                feats = df_oil_clean.loc[idx:idx, oil_feature_cols]
+                preds.append(oil_model.predict(feats)[0] if not feats.isnull().any().any() else np.nan)
             else:
-                oil_predictions.append(np.nan)
-        
-        df['oil_price_prediction'] = oil_predictions
+                preds.append(np.nan)
+        df['oil_price_prediction'] = preds
         df['oil_prediction_premium'] = df['oil_price_prediction'] - df['wti_current']
-        
     except Exception as e:
-        print(f"Warning: Could not generate oil predictions as features: {e}")
+        print(f"Warning: oil preds unavailable: {e}")
         df['oil_price_prediction'] = np.nan
         df['oil_prediction_premium'] = np.nan
-    
-    # Stock-specific technical indicators
-    df['stock_ma_5'] = df['avg_oil_service_stock'].rolling(5, min_periods=5).mean()
-    df['stock_ma_21'] = df['avg_oil_service_stock'].rolling(21, min_periods=21).mean()
-    df['stock_volatility'] = df['avg_oil_service_stock'].rolling(21, min_periods=21).std()
-    df['stock_momentum'] = df['avg_oil_service_stock'] - df['avg_oil_service_stock'].shift(21)
-    df['stock_rsi'] = calculate_rsi(df['avg_oil_service_stock'], 14)
-    
-    # Oil-stock relationship features
-    df['oil_stock_correlation'] = df['WTI ($/bbl)'].rolling(63).corr(df['avg_oil_service_stock'])
-    df['oil_stock_ratio'] = df['WTI ($/bbl)'] / df['avg_oil_service_stock']
-    df['oil_stock_ratio_ma'] = df['oil_stock_ratio'].rolling(21, min_periods=21).mean()
-    
-    # Lagged features
-    for lag in [1, 5, 21]:
-        df[f'stock_lag_{lag}'] = df['avg_oil_service_stock'].shift(lag)
-        df[f'oil_lag_{lag}'] = df['WTI ($/bbl)'].shift(lag)
-    
-    # Economic indicators (already in the dataframe from oil features)
+
+    # Econ features
     if 'usd_strength' not in df.columns:
         df['usd_strength'] = (1/df['USD-GBP'] + df['USD-YEN']/100) / 2
     df['usd_change'] = df['usd_strength'].pct_change(21)
-    
-    # Seasonal patterns
-    df['month'] = pd.to_datetime(df.index).month
-    df['quarter'] = pd.to_datetime(df.index).quarter
-    
+
+    # Seasonal
+    dt = pd.to_datetime(df.index)
+    df['month'] = dt.month
+    df['quarter'] = dt.quarter
+
+    # --- Per-ticker technicals/relations ---
+    for t in tickers:
+        # assume df[t] exists and is the daily close for that ticker
+        df[f'{t}_ma_5']  = df[t].rolling(5,  min_periods=5).mean()
+        df[f'{t}_ma_21'] = df[t].rolling(21, min_periods=21).mean()
+        df[f'{t}_vol']   = df[t].rolling(21, min_periods=21).std()
+        df[f'{t}_mom_21']= df[t] - df[t].shift(21)
+        df[f'{t}_rsi']   = calculate_rsi(df[t], 14)
+
+        # oil-stock relationship for this ticker
+        df[f'{t}_corr_wti_63'] = df['WTI ($/bbl)'].rolling(63).corr(df[t])
+        df[f'{t}_ratio_wti']   = df['WTI ($/bbl)'] / df[t]
+        df[f'{t}_ratio_ma_21'] = df[f'{t}_ratio_wti'].rolling(21, min_periods=21).mean()
+
+        # lags of the ticker and WTI
+        for lag in [1, 5, 21]:
+            df[f'{t}_lag_{lag}'] = df[t].shift(lag)
+        # (one shared set of oil lags is fine; optional per-ticker duplicates removed)
+
     return df
 
-def prepare_stock_target_variable(df, forecast_horizon=21):
-    """
-    Target = avg_oil_service_stock exactly `forecast_horizon` TRADING days ahead,
-    where the index is already trading-day-only (Yahoo).
-    """
+def prepare_stock_target_variable_multi(df, tickers, forecast_horizon=21):
     df = df.sort_index().copy()
+    for t in tickers:
+        df[f'target_{t}'] = df[t].shift(-forecast_horizon)
+    # drop only rows where any target is missing
+    target_cols = [f'target_{t}' for t in tickers]
+    df_labeled = df.dropna(subset=target_cols)
+    print(f"Stock targets created for {tickers}: {len(df_labeled)} valid rows")
+    return df, df_labeled, target_cols
 
-    # Strict "next 21 trading days" via positional shift
-    df['target_stock_price'] = df['avg_oil_service_stock'].shift(-forecast_horizon)
-
-    # Drop only rows where we truly can't form the target/current
-    df_clean = df.dropna(subset=['avg_oil_service_stock', 'target_stock_price'])
-
-    print(f"Stock target variable created: {len(df_clean)} valid predictions")
-    print(f"Removed {len(df) - len(df_clean)} rows without future data")
-    return df_clean
 
 def plot_stock_results(results_df, metrics):
     """
-    Create comprehensive visualization of stock model results
+    Multi-output plotting:
+      - Saves one 2x3 dashboard per ticker: stock_results_<TICKER>.png
+      - Saves a comparison overlay: stock_results_comparison.png
     """
-    fig, axes = plt.subplots(2, 3, figsize=(18, 12))
-    fig.suptitle('Oil Service Stock Price Prediction Model Results', fontsize=16, fontweight='bold')
-    
-    # 1. Actual vs Predicted Time Series
-    ax1 = axes[0, 0]
-    ax1.plot(results_df['date'], results_df['actual'], label='Actual', color='blue', alpha=0.7)
-    ax1.plot(results_df['date'], results_df['predicted'], label='Predicted', color='red', alpha=0.7)
-    ax1.set_title('Actual vs Predicted Stock Prices')
-    ax1.set_ylabel('Stock Price ($)')
-    ax1.legend()
-    ax1.grid(True, alpha=0.3)
-    
-    # 2. Scatter plot: Predicted vs Actual
-    ax2 = axes[0, 1]
-    ax2.scatter(results_df['actual'], results_df['predicted'], alpha=0.6, color='green')
-    min_price = min(results_df['actual'].min(), results_df['predicted'].min())
-    max_price = max(results_df['actual'].max(), results_df['predicted'].max())
-    ax2.plot([min_price, max_price], [min_price, max_price], 'r--', alpha=0.8)
-    ax2.set_xlabel('Actual Stock Price ($)')
-    ax2.set_ylabel('Predicted Stock Price ($)')
-    ax2.set_title(f'Predicted vs Actual (R² = {metrics["r2"]:.3f})')
-    ax2.grid(True, alpha=0.3)
-    
-    # 3. Prediction Errors Over Time
-    ax3 = axes[0, 2]
-    ax3.plot(results_df['date'], results_df['error'], color='purple', alpha=0.7)
-    ax3.axhline(y=0, color='black', linestyle='--', alpha=0.5)
-    ax3.set_title('Prediction Errors Over Time')
-    ax3.set_ylabel('Error ($)')
-    ax3.grid(True, alpha=0.3)
-    
-    # 4. Stock Price vs Oil Price
-    ax4 = axes[1, 0]
-    ax4.scatter(results_df['actual_oil_price'], results_df['actual'], alpha=0.6, color='orange', label='Actual Stock vs Oil')
-    ax4.set_xlabel('Oil Price ($/bbl)')
-    ax4.set_ylabel('Stock Price ($)')
-    ax4.set_title('Stock Price vs Oil Price Relationship')
-    ax4.legend()
-    ax4.grid(True, alpha=0.3)
-    
-    # 5. Oil Predictions vs Stock Performance
-    ax5 = axes[1, 1]
-    valid_oil_pred = results_df.dropna(subset=['oil_prediction'])
-    if len(valid_oil_pred) > 0:
-        ax5.scatter(valid_oil_pred['oil_prediction'], valid_oil_pred['actual'], alpha=0.6, color='brown', label='Stock vs Oil Prediction')
-        ax5.set_xlabel('Oil Price Prediction ($/bbl)')
-        ax5.set_ylabel('Stock Price ($)')
-        ax5.set_title('Stock Price vs Oil Price Predictions')
-        ax5.legend()
-    ax5.grid(True, alpha=0.3)
-    
-    # 6. Error Distribution
-    ax6 = axes[1, 2]
-    ax6.hist(results_df['error'], bins=30, alpha=0.7, color='cyan', edgecolor='black')
-    ax6.axvline(x=0, color='red', linestyle='--', alpha=0.8)
-    ax6.set_title('Distribution of Prediction Errors')
-    ax6.set_xlabel('Error ($)')
-    ax6.set_ylabel('Frequency')
-    ax6.grid(True, alpha=0.3)
-    
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import pandas as pd
+
+    tickers = sorted(results_df['ticker'].unique())
+
+    # ---------- Per-ticker dashboards ----------
+    for t in tickers:
+        df_t = results_df[results_df['ticker'] == t].copy()
+
+        fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+        fig.suptitle(f'{t} Stock Price Prediction Model Results', fontsize=16, fontweight='bold')
+
+        # 1) Actual vs Predicted (time series)
+        ax1 = axes[0, 0]
+        ax1.plot(df_t['date'], df_t['actual'], label='Actual', alpha=0.7)
+        ax1.plot(df_t['date'], df_t['predicted'], label='Predicted', alpha=0.7)
+        ax1.set_title('Actual vs Predicted')
+        ax1.set_ylabel('Price ($)')
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+
+        # 2) Scatter Pred vs Actual
+        ax2 = axes[0, 1]
+        ax2.scatter(df_t['actual'], df_t['predicted'], alpha=0.6)
+        min_p = min(df_t['actual'].min(), df_t['predicted'].min())
+        max_p = max(df_t['actual'].max(), df_t['predicted'].max())
+        ax2.plot([min_p, max_p], [min_p, max_p], linestyle='--', alpha=0.8)
+        r2 = metrics.get(t, {}).get('r2', np.nan)
+        ax2.set_xlabel('Actual ($)')
+        ax2.set_ylabel('Predicted ($)')
+        ax2.set_title(f'Predicted vs Actual (R² = {r2:.3f})' if np.isfinite(r2) else 'Predicted vs Actual')
+        ax2.grid(True, alpha=0.3)
+
+        # 3) Errors over time
+        ax3 = axes[0, 2]
+        ax3.plot(df_t['date'], df_t['error'], alpha=0.7)
+        ax3.axhline(y=0, linestyle='--', alpha=0.5)
+        ax3.set_title('Prediction Errors Over Time')
+        ax3.set_ylabel('Error ($)')
+        ax3.grid(True, alpha=0.3)
+
+        # 4) Stock vs Oil Price
+        ax4 = axes[1, 0]
+        if 'actual_oil_price' in df_t.columns:
+            ax4.scatter(df_t['actual_oil_price'], df_t['actual'], alpha=0.6, label='Actual')
+            ax4.set_xlabel('Oil Price ($/bbl)')
+            ax4.set_ylabel(f'{t} Price ($)')
+            ax4.set_title('Stock vs Oil Price')
+            ax4.legend()
+            ax4.grid(True, alpha=0.3)
+
+        # 5) Oil predictions vs Stock (if available)
+        ax5 = axes[1, 1]
+        if 'oil_prediction' in df_t.columns:
+            valid_oil_pred = df_t.dropna(subset=['oil_prediction'])
+            if len(valid_oil_pred) > 0:
+                ax5.scatter(valid_oil_pred['oil_prediction'], valid_oil_pred['actual'], alpha=0.6)
+                ax5.set_xlabel('Oil Price Prediction ($/bbl)')
+                ax5.set_ylabel(f'{t} Price ($)')
+                ax5.set_title('Stock vs Oil Prediction')
+            ax5.grid(True, alpha=0.3)
+
+        # 6) Error distribution
+        ax6 = axes[1, 2]
+        ax6.hist(df_t['error'], bins=30, alpha=0.7, edgecolor='black')
+        ax6.axvline(x=0, linestyle='--', alpha=0.8)
+        ax6.set_title('Distribution of Prediction Errors')
+        ax6.set_xlabel('Error ($)')
+        ax6.set_ylabel('Frequency')
+        ax6.grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        out_path = f'stock_results_{t}.png'
+        plt.savefig(out_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"Saved per-ticker plot: {out_path}")
+
+    # ---------- Combined comparison overlay ----------
+    # Actual vs Predicted overlay for all tickers
+    fig, ax = plt.subplots(figsize=(14, 6))
+    ax.set_title('Actual vs Predicted (All Tickers)')
+    for t in tickers:
+        df_t = results_df[results_df['ticker'] == t]
+        ax.plot(df_t['date'], df_t['actual'], alpha=0.6, label=f'{t} Actual')
+        ax.plot(df_t['date'], df_t['predicted'], alpha=0.8, label=f'{t} Predicted', linestyle='--')
+    ax.set_ylabel('Price ($)')
+    ax.legend(ncol=2)
+    ax.grid(True, alpha=0.3)
     plt.tight_layout()
-    plt.savefig('stock_prediction_results.png', dpi=300, bbox_inches='tight')
-    plt.close()  # Close the figure to free memory
-    print("Stock prediction plots saved as 'stock_prediction_results.png'")
+    out_path = 'stock_results_comparison.png'
+    plt.savefig(out_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"Saved combined comparison plot: {out_path}")
 
-def build_stock_dataset(df_stocks, oil_model, oil_feature_cols, df_oil_features, horizon=21, verbose=False):
-    # All features for all dates
-    df_feat_all = create_stock_features(df_stocks, oil_model, oil_feature_cols, df_oil_features)
-    
-    # Add target (this will inherently drop last `horizon` when you filter later)
-    df_tgt = prepare_stock_target_variable(df_feat_all, horizon)
+def build_stock_dataset(df_stocks, oil_model, oil_feature_cols, df_oil_features, tickers=["SLB"], horizon=21, verbose=False):
+    df_feat_all = create_stock_features(df_stocks, oil_model, oil_feature_cols, df_oil_features, tickers=tickers)
+    df_tgt_all, df_labeled, target_cols = prepare_stock_target_variable_multi(df_feat_all, tickers, horizon)
 
-    # Labeled training set: drop only rows without target (and essential current)
-    df_labeled = df_tgt.dropna(subset=['avg_oil_service_stock', 'target_stock_price'])
-
-    # (optional) if you still want to remove dup columns
-    df_labeled = df_labeled.loc[:, ~df_labeled.columns.duplicated()]
-
-    exclude = [
-        'target_stock_price','avg_oil_service_stock',
-        'SLB','HAL','BKR','RIG','WTI ($/bbl)','Brent ($/bbl)'
-    ]
-    feature_cols = [c for c in df_labeled.columns
-                    if c not in exclude and df_labeled[c].dtype != 'object']
+    # feature selection (exclude raw prices & targets; keep engineered)
+    exclude = set(['WTI ($/bbl)','Brent ($/bbl)'] + list(tickers) + target_cols)
+    feature_cols = [c for c in df_labeled.columns if c not in exclude and df_labeled[c].dtype != 'object']
 
     X = df_labeled[feature_cols]
-    y = df_labeled['target_stock_price']
-    return df_feat_all, df_labeled, X, y, feature_cols
+    y = df_labeled[target_cols]          # shape (n_samples, 2)
+    return df_feat_all, df_labeled, X, y, feature_cols, target_cols
+
 
 def train_stock_model_on_dataset(X, y, n_splits=3):
-    """Train the stock model on prepared dataset"""
     tscv = TimeSeriesSplit(n_splits=n_splits, test_size=126)
+    # manual CV because multi-output + neg_mae is awkward with cross_val_score
+    maes = []
+    for tr, te in tscv.split(X):
+        m = RandomForestRegressor(
+            n_estimators=100, max_depth=8,
+            min_samples_split=8, min_samples_leaf=4,
+            max_features=0.4, random_state=42, n_jobs=-1
+        )
+        m.fit(X.iloc[tr], y.iloc[tr])
+        pred = m.predict(X.iloc[te])  # (n,2)
+        mae_each = np.mean(np.abs(pred - y.iloc[te].values), axis=0)  # per-output
+        maes.append(mae_each)
+    maes = np.array(maes)
+    print(f"CV MAE per ticker: {y.columns.tolist()} -> {maes.mean(axis=0)} ± {maes.std(axis=0)}")
+
     model = RandomForestRegressor(
         n_estimators=100, max_depth=8,
         min_samples_split=8, min_samples_leaf=4,
         max_features=0.4, random_state=42, n_jobs=-1
     )
-    cv_scores = cross_val_score(model, X, y, cv=tscv, scoring='neg_mean_absolute_error')
-    print(f"Cross-validation MAE: ${-cv_scores.mean():.2f} ± ${cv_scores.std():.2f}")
-    model.fit(X, y)
+    model.fit(X, y)  # one fit, two outputs
     return model
 
-def evaluate_stock_model(model, df_clean, feature_cols):
-    """Evaluate the trained stock model"""
+def evaluate_stock_model_multi(model, df_clean, feature_cols, target_cols, tickers=TICKERS):
     X = df_clean[feature_cols]
-    y_true = df_clean['target_stock_price'].values
-    y_pred = model.predict(X)
+    y_true = df_clean[target_cols].values  # (n,2)
+    y_pred = model.predict(X)              # (n,2)
 
-    mae  = mean_absolute_error(y_true, y_pred)
-    rmse = np.sqrt(mean_squared_error(y_true, y_pred))
-    r2   = r2_score(y_true, y_pred)
-    mape = np.mean(np.abs((y_true - y_pred) / y_true)) * 100
+    metrics = {}
+    results_frames = []
+    for i, t in enumerate(tickers):
+        yt, yp = y_true[:, i], y_pred[:, i]
+        mae  = mean_absolute_error(yt, yp)
+        rmse = np.sqrt(mean_squared_error(yt, yp))
+        r2   = r2_score(yt, yp)
+        mape = np.mean(np.abs((yt - yp) / yt)) * 100
+        metrics[t] = dict(mae=mae, rmse=rmse, r2=r2, mape=mape)
 
-    print("\n📈 Stock Model Performance Metrics:")
-    print(f"MAE ${mae:.2f} | RMSE ${rmse:.2f} | R² {r2:.3f} | MAPE {mape:.2f}%")
+        results_frames.append(pd.DataFrame({
+            'date': df_clean.index,
+            'ticker': t,
+            'actual': yt,
+            'predicted': yp,
+            'error': yt - yp,
+            'abs_error': np.abs(yt - yp),
+            'actual_oil_price': df_clean['wti_current'],
+            'oil_prediction': df_clean.get('oil_price_prediction', np.nan)
+        }))
 
-    results_df = pd.DataFrame({
-        'date': df_clean.index,
-        'actual': y_true,
-        'predicted': y_pred,
-        'error': y_true - y_pred,
-        'abs_error': np.abs(y_true - y_pred),
-        'actual_oil_price': df_clean['wti_current'],
-        'oil_prediction': df_clean['oil_price_prediction']
-    })
-    # add these if they exist in df_clean
-    for col in ['wti_current', 'oil_price_prediction']:
-        if col in df_clean.columns:
-            results_df[col if col != 'wti_current' else 'actual_oil_price'] = df_clean[col].values
-    return results_df, {'mae': mae, 'rmse': rmse, 'r2': r2, 'mape': mape}
+    results_df = pd.concat(results_frames, ignore_index=True)
+    print("\n📈 Per-ticker metrics:")
+    for t in tickers:
+        m = metrics[t]
+        print(f"{t}: MAE ${m['mae']:.2f} | RMSE ${m['rmse']:.2f} | R² {m['r2']:.3f} | MAPE {m['mape']:.2f}%")
+    return results_df, metrics
 
-def predict_future_stock_price(model, df_features_all, feature_cols, horizon=21):
-    # use the most recent *complete* feature row from ALL features
+def predict_future_stock_price_multi(model, df_features_all, feature_cols, tickers=TICKERS, horizon=21):
     latest_row = df_features_all[feature_cols].dropna().iloc[-1:]
     if latest_row.empty:
         print("⚠️  Cannot make stock prediction - insufficient recent data")
         return None, None
 
-    pred = model.predict(latest_row)[0]
-
+    preds = model.predict(latest_row).ravel()  # array of length len(tickers)
     last_date = pd.to_datetime(df_features_all.index[-1])
     pred_date = last_date + pd.tseries.offsets.BDay(horizon)
 
-    print(f"\n🔮 Future Stock Prediction:")
-    if 'avg_oil_service_stock' in df_features_all.columns:
-        current_stock_price = df_features_all['avg_oil_service_stock'].dropna().iloc[-1]
-        print(f"Current avg oil service stock price: ${current_stock_price:.2f}")
-    print(f"Predicted stock price in {horizon} trading days: ${pred:.2f}")
-    print(f"Prediction date: ~{pred_date:%Y-%m-%d}")
-    return pred, pred_date
+    print(f"\n🔮 Future Stock Predictions for {pred_date:%Y-%m-%d}:")
+    out = {}
+    for t, p in zip(tickers, preds):
+        out[t] = float(p)
+        print(f"  {t}: ${p:.2f}")
+    return out, pred_date
 
 def run_stock_prediction(df_stocks, oil_model, oil_feature_cols, df_oil_features):
     """
@@ -652,8 +661,10 @@ def run_stock_prediction(df_stocks, oil_model, oil_feature_cols, df_oil_features
     """
     print("\n🚀 Starting Oil Service Stock Price Prediction Analysis")
     print("=" * 70)
-    print("Target: Monthly average price for SLB + HAL combined")
+    print("Target: Monthly average price for SAL and HAL")
     print("=" * 70)
+
+    TICKERS = ["SLB", "HAL"]
 
     if 'Date' in df_stocks.columns:
         df_stocks = df_stocks.set_index('Date')
@@ -666,12 +677,12 @@ def run_stock_prediction(df_stocks, oil_model, oil_feature_cols, df_oil_features
 
     # 🎯 SINGLE FEATURE COMPUTATION - Build dataset once, reuse everywhere
     print("Building stock features and dataset...")
-    df_feat_all, df_clean, X, y, feature_cols = build_stock_dataset(df_stocks, oil_model, oil_feature_cols, df_oil_features)
+    df_feat_all, df_clean, X, y, feature_cols, target_cols = build_stock_dataset(df_stocks, oil_model, oil_feature_cols, df_oil_features, tickers=TICKERS)    
     print(f"✅ Features built. Dataset shape: {df_clean.shape}, Features: {len(feature_cols)}")
     
     # Debug: Show the date range for predictions
     print(f"📅 Dataset date range: {df_clean.index.min().strftime('%Y-%m-%d')} to {df_clean.index.max().strftime('%Y-%m-%d')}")
-    print(f"📅 Target variable range: {df_clean['target_stock_price'].dropna().index.min().strftime('%Y-%m-%d')} to {df_clean['target_stock_price'].dropna().index.max().strftime('%Y-%m-%d')}")
+    print(f"📅 Target variable range: {df_clean['target_SLB'].dropna().index.min().strftime('%Y-%m-%d')} to {df_clean['target_SLB'].dropna().index.max().strftime('%Y-%m-%d')}")
 
     # Train model
     print("Training stock prediction model...")
@@ -679,18 +690,16 @@ def run_stock_prediction(df_stocks, oil_model, oil_feature_cols, df_oil_features
 
     # Evaluate model
     print("Evaluating model performance...")
-    results_df, metrics = evaluate_stock_model(model, df_clean, feature_cols)
+    results_df, metrics = evaluate_stock_model_multi(model, df_clean, feature_cols, target_cols, tickers=TICKERS)
 
     # Plot results
     plot_stock_results(results_df, metrics)
 
     # Make future prediction using the SAME feature dataset
     print("Generating future prediction...")
-    future_pred, pred_date = predict_future_stock_price(
-        model, df_feat_all, feature_cols
-    )
+    preds, pred_date = predict_future_stock_price_multi(model, df_feat_all, feature_cols, tickers=TICKERS)
 
-    return model, results_df, metrics, future_pred
+    return model, results_df, metrics, preds
     
 if __name__ == "__main__":
     df_raw = data.get_data_from_csv()
