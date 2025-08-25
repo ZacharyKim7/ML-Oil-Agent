@@ -12,9 +12,9 @@ from datetime import datetime, timedelta
 import warnings
 from data_helpers import data_tabulate as data
 
-warnings.filterwarnings('ignore')
+from config import *
 
-TICKERS = ['SLB', 'HAL']
+warnings.filterwarnings('ignore')
 
 def create_features(df):
     """
@@ -578,7 +578,6 @@ def build_stock_dataset(df_stocks, oil_model, oil_feature_cols, df_oil_features,
     y = df_labeled[target_cols]          # shape (n_samples, 2)
     return df_feat_all, df_labeled, X, y, feature_cols, target_cols
 
-
 def train_stock_model_on_dataset(X, y, n_splits=3):
     tscv = TimeSeriesSplit(n_splits=n_splits, test_size=126)
     # manual CV because multi-output + neg_mae is awkward with cross_val_score
@@ -696,12 +695,326 @@ def run_stock_prediction(df_stocks, oil_model, oil_feature_cols, df_oil_features
     plot_stock_results(results_df, metrics)
 
     # Make future prediction using the SAME feature dataset
-    print("Generating future prediction...")
+    print("Generating future predictions...")
     preds, pred_date = predict_future_stock_price_multi(model, df_feat_all, feature_cols, tickers=TICKERS)
 
     return model, results_df, metrics, preds
+
+from sklearn.linear_model import Ridge
+
+def train_base_model_on_anchors(X, y, all_tickers, anchor_tickers, n_splits=3):
+    """
+    Train the multi-output base model on anchor tickers only.
+    Returns:
+        base_model: fitted RandomForestRegressor (multi-output for anchors)
+        anchor_cols: list of y column names used
+        anchor_idx_map: {ticker -> column index in base_model output}
+    """
+    anchor_cols = [f'target_{t}' for t in anchor_tickers]
+    y_anchor = y[anchor_cols]
+
+    # CV on anchors (optional but nice to keep)
+    tscv = TimeSeriesSplit(n_splits=n_splits, test_size=126)
+    maes = []
+    for tr, te in tscv.split(X):
+        m = RandomForestRegressor(
+            n_estimators=100, max_depth=8,
+            min_samples_split=8, min_samples_leaf=4,
+            max_features=0.4, random_state=42, n_jobs=-1
+        )
+        m.fit(X.iloc[tr], y_anchor.iloc[tr])
+        pred = m.predict(X.iloc[te])
+        mae_each = np.mean(np.abs(pred - y_anchor.iloc[te].values), axis=0)
+        maes.append(mae_each)
+    maes = np.array(maes)
+    print(f"[Base/Anchors] CV MAE -> {anchor_cols}: {maes.mean(axis=0)} ± {maes.std(axis=0)}")
+
+    base_model = RandomForestRegressor(
+        n_estimators=200, max_depth=10,
+        min_samples_split=6, min_samples_leaf=3,
+        max_features=0.5, random_state=42, n_jobs=-1
+    )
+    base_model.fit(X, y_anchor)
+
+    anchor_idx_map = {t: i for i, t in enumerate(anchor_tickers)}
+    return base_model, anchor_cols, anchor_idx_map
+
+
+def compute_basket_pred(base_model, X, anchor_tickers, anchor_idx_map):
+    """
+    Run base model and compute the anchor basket prediction as the mean across anchors.
+    Returns:
+        basket_pred: pd.Series aligned to X.index
+        preds_df:    pd.DataFrame with per-anchor predictions (columns = anchor tickers)
+    """
+    import pandas as pd
+    base_preds = base_model.predict(X)  # shape (n, len(anchors))
+    preds_df = pd.DataFrame(
+        base_preds,
+        index=X.index,
+        columns=anchor_tickers
+    )
+    basket_pred = preds_df.mean(axis=1).rename("basket_pred")
+    return basket_pred, preds_df
+
+
+def train_transfer_adapters(df_clean, feature_cols, target_cols,
+                            basket_pred, shared_extra_cols=None,
+                            all_tickers=None, anchor_tickers=None):
+    """
+    For each NON-anchor ticker, train a small adapter (Ridge by default):
+        adapter_features = [basket_pred] + selected shared features
+        target = target_<ticker>
+    Returns:
+        adapters: dict[ticker] = fitted adapter model
+        adapter_features_cols: list of columns used for adapters
+    """
+    import pandas as pd
+    adapters = {}
+
+    if all_tickers is None:
+        # infer from target_cols
+        all_tickers = [c.replace('target_', '') for c in target_cols]
+    non_anchor = [t for t in all_tickers if t not in set(anchor_tickers or [])]
+
+    # Build adapter design matrix
+    # Start with basket_pred (mandatory signal)
+    design = pd.DataFrame(index=df_clean.index)
+    design['basket_pred'] = basket_pred
+
+    # A few robust shared features (low risk of leakage/regime-shift-sensitive)
+    default_shared = ['wti_current', 'usd_strength', 'month', 'quarter', 'oil_price_prediction']
+    shared_extra_cols = shared_extra_cols or []
+    adapter_cols = ['basket_pred'] + [c for c in default_shared + shared_extra_cols
+                                      if c in df_clean.columns and c in feature_cols]
+
+    for c in adapter_cols[1:]:  # already added basket_pred
+        design[c] = df_clean[c]
+
+    # Train one adapter per non-anchor ticker
+    for t in non_anchor:
+        target_col = f'target_{t}'
+        if target_col not in df_clean.columns:
+            print(f"[Adapter] Skipping {t}: no target column found.")
+            continue
+
+        # Use only rows where both features and target exist
+        df_t = design.join(df_clean[[target_col]], how='inner').dropna()
+        if len(df_t) < 200:
+            print(f"[Adapter] Skipping {t}: insufficient overlap rows ({len(df_t)}).")
+            continue
+
+        X_t = df_t[adapter_cols]
+        y_t = df_t[target_col]
+
+        # A simple, stable adapter
+        adapter = Ridge(alpha=1.0, fit_intercept=True, random_state=42)
+        adapter.fit(X_t, y_t)
+        adapters[t] = adapter
+
+        # Quick diagnostics
+        yhat = adapter.predict(X_t)
+        mae = mean_absolute_error(y_t, yhat)
+        r2  = r2_score(y_t, yhat)
+        print(f"[Adapter] {t}: trained on {len(df_t)} rows | MAE={mae:.3f} | R²={r2:.3f}")
+
+    return adapters, adapter_cols
+
+def evaluate_with_adapters(base_model, df_clean, feature_cols, target_cols,
+                           tickers, anchor_tickers, anchor_idx_map, adapter_models, adapter_cols):
+    """
+    Produces a results_df/metrics using:
+      - anchor tickers -> base_model directly
+      - non-anchors    -> adapter(basket_pred, shared features)
+    """
+    import pandas as pd
+    # Base preds for anchors + basket
+    X = df_clean[feature_cols]
+    basket_pred, anchor_pred_df = compute_basket_pred(base_model, X, anchor_tickers, anchor_idx_map)
+
+    metrics = {}
+    frames = []
+
+    for t in tickers:
+        target_col = f"target_{t}"
+        if target_col not in df_clean.columns:
+            continue
+
+        # align target rows
+        valid = df_clean[target_col].notna()
+        y_true = df_clean.loc[valid, target_col].values
+        dates  = df_clean.loc[valid].index
+
+        if t in anchor_tickers:
+            # direct from base model column
+            y_hat_full = anchor_pred_df[t]
+            y_pred = y_hat_full.loc[dates].values
+        else:
+            # adapter path
+            if t not in adapter_models:
+                print(f"[Eval] No adapter for {t}; skipping.")
+                continue
+            # build adapter features (aligned)
+            A = pd.DataFrame(index=df_clean.index)
+            A['basket_pred'] = basket_pred
+            for c in adapter_cols:
+                if c == 'basket_pred':
+                    continue
+                if c in df_clean.columns:
+                    A[c] = df_clean[c]
+            A = A.loc[dates, adapter_cols].dropna()
+            # make sure target aligns with features (drop rows that got NaN in A)
+            y_true = df_clean.loc[A.index, target_col].values
+            y_pred = adapter_models[t].predict(A.values)
+
+        mae  = mean_absolute_error(y_true, y_pred)
+        rmse = np.sqrt(mean_squared_error(y_true, y_pred))
+        r2   = r2_score(y_true, y_pred)
+        mape = float(np.mean(np.abs((y_true - y_pred) / y_true)) * 100)
+
+        metrics[t] = dict(mae=mae, rmse=rmse, r2=r2, mape=mape)
+
+        frames.append(pd.DataFrame({
+            'date': dates,
+            'ticker': t,
+            'actual': y_true,
+            'predicted': y_pred,
+            'error': y_true - y_pred,
+            'abs_error': np.abs(y_true - y_pred),
+            'actual_oil_price': df_clean.loc[dates, 'wti_current'],
+            'oil_prediction': df_clean.loc[dates, 'oil_price_prediction'] if 'oil_price_prediction' in df_clean.columns else np.nan
+        }))
+
+    results_df = pd.concat(frames, ignore_index=True)
+    print("\n📈 Per-ticker metrics (Base+Adapters):")
+    for t in metrics:
+        m = metrics[t]
+        print(f"{t}: MAE ${m['mae']:.2f} | RMSE ${m['rmse']:.2f} | R² {m['r2']:.3f} | MAPE {m['mape']:.2f}%")
+
+    return results_df, metrics
+
+def predict_future_with_adapters(base_model, df_features_all, feature_cols,
+                                 tickers, anchor_tickers, anchor_idx_map,
+                                 adapter_models, adapter_cols, horizon=21):
+    """
+    Predict one horizon ahead using latest available features.
+    """
+    import pandas as pd
+
+    latest_row = df_features_all[feature_cols].dropna().iloc[-1:]
+    if latest_row.empty:
+        print("⚠️  Cannot predict - insufficient recent data")
+        return None, None
+
+    # 1) base preds (anchors) + basket
+    base_pred = base_model.predict(latest_row)  # shape (1, len(anchors))
+    anchor_pred = {t: float(base_pred[0, i]) for t, i in anchor_idx_map.items()}
+    basket_val = float(sum(anchor_pred.values()) / len(anchor_pred))
+    # 2) adapters for non-anchors
+    adapter_input = latest_row.copy()
+    # assemble adapter feature vector
+    adapter_input = adapter_input.assign(basket_pred=basket_val)
+    for c in adapter_cols:
+        if c == 'basket_pred':
+            continue
+        if c not in adapter_input.columns and c in df_features_all.columns:
+            adapter_input[c] = df_features_all[c].iloc[-1]
+
+    last_date = pd.to_datetime(df_features_all.index[-1])
+    pred_date = last_date + pd.tseries.offsets.BDay(horizon)
+
+    out = {}
+    # anchors from base
+    for t in anchor_tickers:
+        out[t] = anchor_pred[t]
+
+    # non-anchors via adapters
+    for t, adapter in adapter_models.items():
+        Xa = adapter_input[adapter_cols].values
+        out[t] = float(adapter.predict(Xa)[0])
+
+    print(f"\n🔮 Future Stock Predictions (Base+Adapters) for {pred_date:%Y-%m-%d}:")
+    for t in tickers:
+        if t in out:
+            print(f"  {t}: ${out[t]:.2f}")
+    return out, pred_date
+
+def run_stock_prediction_with_transfer(df_stocks, oil_model, oil_feature_cols, df_oil_features,
+                                       anchor_tickers=("SLB","HAL"), all_tickers=("SLB","HAL"),
+                                       horizon=21):
+    """
+    Same as run_stock_prediction, but:
+      - trains a base model on anchors only
+      - trains adapters for non-anchors
+    """
+    print("\n🚀 Starting Oil Service Stock Price Prediction (Transfer Learning)")
+    print("=" * 70)
+    print(f"Anchors: {list(anchor_tickers)} | All tickers: {list(all_tickers)}")
+
+    # --- prep ---
+    if 'Date' in df_stocks.columns:
+        df_stocks = df_stocks.set_index('Date')
+    df_stocks.index = pd.to_datetime(df_stocks.index)
+    if df_stocks.index[0] > df_stocks.index[-1]:
+        df_stocks = df_stocks.iloc[::-1]
+
+    # Build features/targets for ALL tickers (so targets exist for adapters)
+    df_feat_all, df_clean, X, y, feature_cols, target_cols = build_stock_dataset(
+        df_stocks, oil_model, oil_feature_cols, df_oil_features, tickers=list(all_tickers), horizon=horizon
+    )
+
+    # --- Stage 1: Base on anchors ---
+    base_model, anchor_cols, anchor_idx_map = train_base_model_on_anchors(
+        X, y, all_tickers=list(all_tickers), anchor_tickers=list(anchor_tickers)
+    )
+    basket_pred, _anchor_pred_df = compute_basket_pred(base_model, X, list(anchor_tickers), anchor_idx_map)
+
+    # --- Stage 2: Adapters for non-anchors ---
+    adapter_models, adapter_cols = train_transfer_adapters(
+        df_clean, feature_cols, target_cols, basket_pred,
+        shared_extra_cols=[],  # you can pass more shared cols if you want
+        all_tickers=list(all_tickers),
+        anchor_tickers=list(anchor_tickers)
+    )
+
+    # --- Evaluate combined (base + adapters) ---
+    results_df, metrics = evaluate_with_adapters(
+        base_model, df_clean, feature_cols, target_cols,
+        tickers=list(all_tickers),
+        anchor_tickers=list(anchor_tickers),
+        anchor_idx_map=anchor_idx_map,
+        adapter_models=adapter_models, adapter_cols=adapter_cols
+    )
+
+    # Plot with your existing function
+    plot_stock_results(results_df, metrics)
+
+    # --- Predict future ---
+    preds, pred_date = predict_future_with_adapters(
+        base_model, df_feat_all, feature_cols,
+        tickers=list(all_tickers),
+        anchor_tickers=list(anchor_tickers),
+        anchor_idx_map=anchor_idx_map,
+        adapter_models=adapter_models, adapter_cols=adapter_cols,
+        horizon=horizon
+    )
+
+    # Package models so you can reuse later
+    transfer_bundle = {
+        "base_model": base_model,
+        "anchor_tickers": list(anchor_tickers),
+        "anchor_idx_map": anchor_idx_map,
+        "adapter_models": adapter_models,
+        "adapter_cols": adapter_cols,
+        "feature_cols": feature_cols
+    }
+
+    return transfer_bundle, results_df, metrics, preds
     
 if __name__ == "__main__":
+    ANCHORS = TICKERS
+    ALL_TICKERS = TICKERS + EXTRA_TICKERS
+
     df_raw = data.get_data_from_csv()
 
     # First run oil price prediction
@@ -712,7 +1025,7 @@ if __name__ == "__main__":
     # Get stock data (this will process df_raw internally)
     print("\n📈 PHASE 2: Stock Data Integration")  
     print("-" * 50)
-    df_stocks = data.add_stocks_to_df(df_raw)
+    df_stocks = data.add_stocks_to_df(df_raw, " ".join(ALL_TICKERS))
     print(f"✅ Stock data integrated. Shape: {df_stocks.shape}")
     
     # Extract feature columns from oil model training (avoid reprocessing)
@@ -734,6 +1047,14 @@ if __name__ == "__main__":
     print(f"\n📈 PHASE 3: Stock Price Prediction")
     print("-" * 50)
     
-    stock_model, stock_results, stock_metrics, stock_prediction = run_stock_prediction(
-        df_stocks, oil_model, oil_feature_cols, df_oil_features
+    # stock_model, stock_results, stock_metrics, stock_prediction = run_stock_prediction(
+    #     df_stocks, oil_model, oil_feature_cols, df_oil_features
+    # )
+
+    # Define your anchors (long history) and the full set including new/short-history names
+
+
+    transfer_bundle, stock_results, stock_metrics, stock_prediction = run_stock_prediction_with_transfer(
+        df_stocks, oil_model, oil_feature_cols, df_oil_features,
+        anchor_tickers=ANCHORS, all_tickers=ALL_TICKERS, horizon=21
     )
