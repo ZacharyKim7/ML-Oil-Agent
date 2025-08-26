@@ -7,11 +7,13 @@ from sklearn.preprocessing import StandardScaler
 import matplotlib
 matplotlib.use('Agg')  # Use non-GUI backend
 import matplotlib.pyplot as plt
-import seaborn as sns
+# import seaborn as sns
 from datetime import datetime, timedelta
 import warnings
 from data_helpers import data_tabulate as data
-
+import os
+import joblib
+import json
 from config import *
 
 warnings.filterwarnings('ignore')
@@ -1010,12 +1012,118 @@ def run_stock_prediction_with_transfer(df_stocks, oil_model, oil_feature_cols, d
     }
 
     return transfer_bundle, results_df, metrics, preds
-    
-if __name__ == "__main__":
+
+def save_transfer_bundle(transfer_bundle, path="models/transfer_bundle.pkl", extra_meta=None):
+    """
+    Persist the whole bundle (base model, adapters, columns, maps).
+    Also writes a small sidecar JSON with light metadata for sanity checks.
+    """
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    joblib.dump(transfer_bundle, path)
+
+    meta = {
+        "saved_at": datetime.utcnow().isoformat() + "Z",
+        "anchor_tickers": transfer_bundle.get("anchor_tickers", []),
+        "adapter_tickers": sorted(list(transfer_bundle.get("adapter_models", {}).keys())),
+        "n_adapter_features": len(transfer_bundle.get("adapter_cols", [])),
+        "n_feature_cols": len(transfer_bundle.get("feature_cols", [])),
+        "sklearn_hint": "Bundle contains sklearn models; restore with joblib.load().",
+    }
+    if extra_meta:
+        meta.update(extra_meta)
+
+    json_path = os.path.splitext(path)[0] + ".meta.json"
+    with open(json_path, "w") as f:
+        json.dump(meta, f, indent=2)
+    print(f"✅ Saved transfer bundle → {path}")
+    print(f"📝 Wrote metadata → {json_path}")
+
+
+def load_transfer_bundle(path="models/transfer_bundle.pkl"):
+    """
+    Load the previously saved transfer bundle.
+    """
+    bundle = joblib.load(path)
+    print(f"📦 Loaded transfer bundle from {path}")
+    # quick sanity notes
+    print("  Anchors:", bundle.get("anchor_tickers"))
+    print("  Adapter tickers:", sorted(list(bundle.get("adapter_models", {}).keys())))
+    print("  #feature_cols:", len(bundle.get("feature_cols", [])))
+    print("  #adapter_cols:", len(bundle.get("adapter_cols", [])))
+    return bundle
+
+def predict_future_from_loaded_bundle(transfer_bundle, df_features_all, horizon=21):
+    """
+    Make a one-step-ahead prediction using a previously loaded transfer bundle.
+    Assumes df_features_all already has the same feature engineering as during training.
+    """
+    base_model   = transfer_bundle["base_model"]
+    feature_cols = transfer_bundle["feature_cols"]
+    adapter_cols = transfer_bundle["adapter_cols"]
+    anchor_ticks = transfer_bundle["anchor_tickers"]
+    anchor_idx   = transfer_bundle["anchor_idx_map"]
+    adapters     = transfer_bundle["adapter_models"]
+
+    # 1) latest feature row (aligned to training feature_cols)
+    latest_row = df_features_all[feature_cols].dropna().iloc[-1:]
+    if latest_row.empty:
+        print("⚠️  Cannot predict — no complete latest feature row.")
+        return None, None
+
+    # 2) anchors via base model
+    base_pred = base_model.predict(latest_row)  # shape (1, len(anchors))
+    anchor_pred = {t: float(base_pred[0, anchor_idx[t]]) for t in anchor_ticks}
+    basket_val = float(sum(anchor_pred.values()) / max(1, len(anchor_pred)))
+
+    # 3) assemble adapter input
+    adapter_input = latest_row.copy()
+    adapter_input = adapter_input.assign(basket_pred=basket_val)
+
+    # ensure remaining adapter_cols exist (e.g., ['basket_pred', 'wti_current', ...])
+    for c in adapter_cols:
+        if c not in adapter_input.columns:
+            # try to pull from df_features_all if it’s a shared feature
+            if c in df_features_all.columns:
+                adapter_input[c] = df_features_all[c].iloc[-1]
+            elif c == "basket_pred":
+                adapter_input[c] = basket_val
+            else:
+                # missing column is a hard stop; it means FE changed vs training
+                raise ValueError(f"Missing adapter feature at inference: {c}")
+
+    # 4) predict horizon timestamp
+    last_date = pd.to_datetime(df_features_all.index[-1])
+    pred_date = last_date + pd.tseries.offsets.BDay(horizon)
+
+    # 5) build output for both anchors and any adapters
+    out = {}
+    # anchors
+    for t in anchor_ticks:
+        out[t] = anchor_pred[t]
+    # non-anchors with adapters
+    if adapters:
+        Xa = adapter_input[adapter_cols].values
+        for t, adapter in adapters.items():
+            out[t] = float(adapter.predict(Xa)[0])
+
+    print(f"\n🔮 Future Stock Predictions (Loaded Bundle) for {pred_date:%Y-%m-%d}:")
+    for t, p in out.items():
+        print(f"  {t}: ${p:.2f}")
+
+    return out, pred_date
+
+def main():
     ANCHORS = TICKERS
     ALL_TICKERS = TICKERS + EXTRA_TICKERS
+    df_raw = None
+    if NEW_DATA:
+        df_raw = data.get_combined_oil_df()
+    else:
+        df_raw = data.get_data_from_csv()
 
-    df_raw = data.get_data_from_csv()
+    if 'Date' in df_raw.columns:
+        df_raw = df_raw.set_index('Date')
+    df_raw.index = pd.to_datetime(df_raw.index)
 
     # First run oil price prediction
     print("\n📊 PHASE 1: Oil Price Prediction")
@@ -1025,14 +1133,10 @@ if __name__ == "__main__":
     # Get stock data (this will process df_raw internally)
     print("\n📈 PHASE 2: Stock Data Integration")  
     print("-" * 50)
-    df_stocks = data.add_stocks_to_df(df_raw, " ".join(ALL_TICKERS))
+    df_stocks = data.add_stocks_to_df(df_raw, " ".join(ALL_TICKERS), NEW_DATA)
     print(f"✅ Stock data integrated. Shape: {df_stocks.shape}")
     
-    # Extract feature columns from oil model training (avoid reprocessing)
     df_temp = df_raw.copy()
-    if 'Date' in df_temp.columns:
-        df_temp = df_temp.set_index('Date')
-    df_temp.index = pd.to_datetime(df_temp.index)
     
     df_oil_features = create_features(df_temp)
     df_oil_with_target = prepare_target_variable(df_oil_features, 21)
@@ -1051,10 +1155,29 @@ if __name__ == "__main__":
     #     df_stocks, oil_model, oil_feature_cols, df_oil_features
     # )
 
-    # Define your anchors (long history) and the full set including new/short-history names
+    if TRAIN_NEW_MODEL:
+        transfer_bundle, stock_results, stock_metrics, stock_prediction = run_stock_prediction_with_transfer(
+            df_stocks, oil_model, oil_feature_cols, df_oil_features,
+            anchor_tickers=ANCHORS, all_tickers=ALL_TICKERS, horizon=21
+        )
 
+        if SAVE_MODEL:
+            save_transfer_bundle(
+                transfer_bundle,
+                path="models/transfer_bundle.pkl",
+                extra_meta={"horizon_bd": 21, "code_tag": "v1.0"}
+            )
+    else:
+        loaded = load_transfer_bundle("models/transfer_bundle.pkl")
 
-    transfer_bundle, stock_results, stock_metrics, stock_prediction = run_stock_prediction_with_transfer(
-        df_stocks, oil_model, oil_feature_cols, df_oil_features,
-        anchor_tickers=ANCHORS, all_tickers=ALL_TICKERS, horizon=21
-    )
+        # Important: rebuild features the same way you did during training
+        # (same create_stock_features pipeline, same column names!)
+        df_feat_all = create_stock_features(
+            df_stocks, oil_model, oil_feature_cols, df_oil_features, tickers=ALL_TICKERS
+        )
+
+        # predict without retraining
+        preds, pred_date = predict_future_from_loaded_bundle(loaded, df_feat_all, horizon=21)
+    
+if __name__ == "__main__":
+    main()
