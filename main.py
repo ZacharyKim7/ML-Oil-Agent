@@ -1125,6 +1125,9 @@ def main():
         df_raw = df_raw.set_index('Date')
     df_raw.index = pd.to_datetime(df_raw.index)
 
+    df_stocks = data.add_stocks_to_df(df_raw, " ".join(ALL_TICKERS), NEW_DATA)
+    df_raw = df_stocks.drop(columns=ALL_TICKERS)
+    
     # First run oil price prediction
     print("\n📊 PHASE 1: Oil Price Prediction")
     print("-" * 50)

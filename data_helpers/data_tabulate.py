@@ -784,6 +784,27 @@ def add_world_population(df, live_read=False, lag_days=365):
     # Merge with the master DataFrame
     return df.merge(daily_df, how="left", left_index=True, right_index=True)
 
+def fill_columns(master):
+    master["WTI ($/bbl)"] = master["WTI ($/bbl)"].bfill()
+    master["Brent ($/bbl)"] = master["Brent ($/bbl)"].bfill()
+    master["OPEC P (tbbl/d)"] = master["OPEC P (tbbl/d)"].bfill()
+    master["NOPEC P (tbbl/d)"] = master["NOPEC P (tbbl/d)"].bfill()
+    master["OECD C (tbbl/d)"] = master["OECD C (tbbl/d)"].bfill()
+    master["China C (tbbl/d)"] = master["China C (tbbl/d)"].bfill()
+    master["India C (tbbl/d)"] = master["India C (tbbl/d)"].bfill()
+    master["OECD S (mbbl)"] = master["OECD S (mbbl)"].bfill()
+    master["USA S (mbbl)"] = master["USA S (mbbl)"].bfill()
+    master["US net imports (tbbl/d)"] = master["US net imports (tbbl/d)"].bfill()
+    master["USA rigs (m)"] = master["USA rigs (m)"].bfill()
+    master["CPI"] = master["CPI"].bfill()
+    master["GDP (yoy%)"] = master["GDP (yoy%)"].bfill()
+    master["Population"] = master["Population"].bfill()
+    master["USD-GBP"] = master["USD-GBP"].bfill()
+    master["USD-YEN"] = master["USD-YEN"].bfill()
+    master["USD-GBP"] = master["USD-GBP"].bfill()
+
+    return master
+
 # Controls whether API data is stored as JSON and read, or pulled and processed directly in memory
 handle_in_memory = True
 def get_combined_oil_df(save=True):
@@ -810,23 +831,7 @@ def get_combined_oil_df(save=True):
         # .pipe(add_USA_from_NOPEC, live_read=handle_in_memory, lag_days=30)
     )
 
-    master["WTI ($/bbl)"] = master["WTI ($/bbl)"].bfill()
-    master["Brent ($/bbl)"] = master["Brent ($/bbl)"].bfill()
-    master["OPEC P (tbbl/d)"] = master["OPEC P (tbbl/d)"].bfill()
-    master["NOPEC P (tbbl/d)"] = master["NOPEC P (tbbl/d)"].bfill()
-    master["OECD C (tbbl/d)"] = master["OECD C (tbbl/d)"].bfill()
-    master["China C (tbbl/d)"] = master["China C (tbbl/d)"].bfill()
-    master["India C (tbbl/d)"] = master["India C (tbbl/d)"].bfill()
-    master["OECD S (mbbl)"] = master["OECD S (mbbl)"].bfill()
-    master["USA S (mbbl)"] = master["USA S (mbbl)"].bfill()
-    master["US net imports (tbbl/d)"] = master["US net imports (tbbl/d)"].bfill()
-    master["USA rigs (m)"] = master["USA rigs (m)"].bfill()
-    master["CPI"] = master["CPI"].bfill()
-    master["GDP (yoy%)"] = master["GDP (yoy%)"].bfill()
-    master["Population"] = master["Population"].bfill()
-    master["USD-GBP"] = master["USD-GBP"].bfill()
-    master["USD-YEN"] = master["USD-YEN"].bfill()
-    master["USD-GBP"] = master["USD-GBP"].bfill()
+    master = fill_columns(master)
 
     if save:
         # Save the DataFrame to data/combined_oil_df.csv, overwriting if it exists
@@ -844,23 +849,7 @@ For use in development and testing.
 def get_data_from_csv():
     master = pd.read_csv(os.path.join(os.path.dirname(os.path.dirname(__file__)), "data/combined_oil_df.csv"))
 
-    master["WTI ($/bbl)"] = master["WTI ($/bbl)"].bfill()
-    master["Brent ($/bbl)"] = master["Brent ($/bbl)"].bfill()
-    master["OPEC P (tbbl/d)"] = master["OPEC P (tbbl/d)"].bfill()
-    master["NOPEC P (tbbl/d)"] = master["NOPEC P (tbbl/d)"].bfill()
-    master["OECD C (tbbl/d)"] = master["OECD C (tbbl/d)"].bfill()
-    master["China C (tbbl/d)"] = master["China C (tbbl/d)"].bfill()
-    master["India C (tbbl/d)"] = master["India C (tbbl/d)"].bfill()
-    master["OECD S (mbbl)"] = master["OECD S (mbbl)"].bfill()
-    master["USA S (mbbl)"] = master["USA S (mbbl)"].bfill()
-    master["US net imports (tbbl/d)"] = master["US net imports (tbbl/d)"].bfill()
-    master["USA rigs (m)"] = master["USA rigs (m)"].bfill()
-    master["CPI"] = master["CPI"].bfill()
-    master["GDP (yoy%)"] = master["GDP (yoy%)"].bfill()
-    master["Population"] = master["Population"].bfill()
-    master["USD-GBP"] = master["USD-GBP"].bfill()
-    master["USD-YEN"] = master["USD-YEN"].bfill()
-    master["USD-GBP"] = master["USD-GBP"].bfill()
+    master = fill_columns(master)
 
     return master
 
@@ -869,12 +858,38 @@ Gets Yahoo stock data and appends it to a master data frame
 Used for secondary training of predictive models for stock prices.
 """
 def add_stocks_to_df(df, stock_list, live=True):
-    stocks = YF.get_stock_prices(stocks=stock_list, start_date="1985-01-01", live_read=live, save=True)
+    # Read
+    stocks = YF.get_stock_prices(
+        stocks=stock_list, start_date="1985-01-01",
+        live_read=live, save=True
+    )
     master = df.copy()
-    # master = df.set_index("Date")
 
-    # Trim to match master DataFrame's date range
-    stocks = stocks.reindex(master.index)
+    # Safety: ensure DatetimeIndex
+    master.index = pd.to_datetime(master.index)
+    stocks.index = pd.to_datetime(stocks.index)
 
-    # Merge with the master DataFrame
-    return master.merge(stocks, how='left', left_index=True, right_index=True)
+    # Define range: [master_start, stocks_end]
+    master_start = master.index.min()
+    stocks_end   = stocks.index.max()
+
+    # Drop any stock rows earlier than master start (optional, keeps your rule strict)
+    stocks = stocks[stocks.index >= master_start]
+
+    # Outer-align columns by index (simpler than merge for index logic)
+    merged = pd.concat([master, stocks], axis=1, join="outer")
+
+    # Build the custom union index limited to [master_start, stocks_end]
+    union_idx = merged.index
+    desired_idx = union_idx[(union_idx >= master_start) & (union_idx <= stocks_end)]
+
+    # Preserve master’s index direction
+    keep_ascending = master.index.is_monotonic_increasing
+    desired_idx = desired_idx.sort_values(ascending=keep_ascending)
+
+    # Reindex to desired union and forward-fill new rows at the tail
+    merged = merged.reindex(desired_idx).bfill()
+
+    master = fill_columns(master)
+
+    return merged
