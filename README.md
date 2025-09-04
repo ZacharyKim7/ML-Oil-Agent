@@ -49,14 +49,34 @@ ML-Oil-Agent$ python -m main
 
 * US Rig Counts (Monthly)
 
-# Files
+## Historical Economic Data
 
-* main_archive contains old RF and quantile regression
+* CPI (Year of Year change)
 
-* Main2 has another quantile regression
+* USD-GBP exhange rate
 
-# Main3 has OOS random forest
+USD-
 
-# test.py has claude predictions with bad results
+## Stocks Tracked
 
-# 
+* Haliburton (HAL)
+
+* Schlumberger (SLB)
+
+* NOV (1996)
+
+* HP (1963)
+
+* VAL (2021)
+
+* FTI (2017)
+
+* CLB (1995)
+
+* NINE (2018)
+
+* PUMP (2017)
+
+* RES (2023)
+
+* LBRT (2018)
